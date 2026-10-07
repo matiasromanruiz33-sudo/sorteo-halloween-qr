@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.firebase/
+firebase-debug.log
+.DS_Store
+
+# Material de referencia original; contiene códigos antiguos.
+validador.html
+resultado_sorteo.txt
+codigos_ganadores.csv
+qr/
