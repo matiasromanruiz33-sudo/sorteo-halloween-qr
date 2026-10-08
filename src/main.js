@@ -76,7 +76,11 @@ document.querySelector("#app").innerHTML = `
         <div class="password-field">
           <input id="login-password" type="password" autocomplete="current-password" placeholder="Ingresa tu contraseña" required />
           <button class="password-toggle" id="toggle-password" type="button" aria-label="Mostrar contraseña" aria-pressed="false">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path class="eye-open" d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path>
+              <circle class="eye-pupil" cx="12" cy="12" r="2.5"></circle>
+              <path class="eye-closed" d="M3 10.5c2.5 3.2 5.5 4.8 9 4.8s6.5-1.6 9-4.8M7 15.5l-1.2 2M12 16.2v2.2M17 15.5l1.2 2"></path>
+            </svg>
           </button>
         </div>
         <p class="form-error" id="login-error" role="alert"></p>
