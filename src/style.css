@@ -36,7 +36,12 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .login-card h1, .page-heading h1, .event-heading h1, .scanner-heading h1 { margin: 0; font: 700 clamp(52px, 7vw, 92px)/.88 "Oswald", sans-serif; text-transform: uppercase; }
 .login-copy { max-width: 390px; margin: 27px 0 40px; color: var(--muted); line-height: 1.7; }
 .login-card form { display: grid; }
-.fixed-email { min-height: 52px; margin-bottom: 24px; padding: 15px 16px; border: 1px solid #272727; color: #777; background: #0a0a0a; }
+#login-email { margin-bottom: 24px; }
+.password-field { position: relative; margin-bottom: 7px; }
+.password-field input { margin-bottom: 0; padding-right: 58px; }
+.password-toggle { width: 50px; height: 50px; position: absolute; top: 0; right: 0; display: grid; place-items: center; border: 0; border-left: 1px solid #2d2d2d; color: #777; background: transparent; }
+.password-toggle:hover, .password-toggle[aria-pressed="true"] { color: var(--paper); }
+.password-toggle svg { width: 21px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 
 label { margin-bottom: 9px; color: #d3d1cc; font: 11px "Oswald", sans-serif; letter-spacing: .12em; text-transform: uppercase; }
 label small { color: #656565; }
@@ -185,8 +190,8 @@ dialog::backdrop { background: rgba(0,0,0,.86); backdrop-filter: blur(5px); }
 .small-dialog { width: min(450px, calc(100% - 28px)); }
 .qr-dialog { text-align: center; }
 .qr-dialog h2 { overflow-wrap: anywhere; }
-.large-qr { margin: 25px auto 17px; padding: 14px; display: inline-grid; background: white; }
-.large-qr canvas { width: min(290px, 100%) !important; height: auto !important; }
+.large-qr { width: fit-content; margin: 25px auto 17px; padding: 14px; display: grid; place-items: center; background: white; }
+.large-qr canvas { display: block; width: min(290px, 100%) !important; height: auto !important; margin: 0 auto; }
 .ticket-code { color: #6d6d6d; font: 10px "Oswald", sans-serif; letter-spacing: .13em; }
 .dialog-actions { margin-top: 25px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .result-dialog { width: min(460px, calc(100% - 28px)); text-align: center; }

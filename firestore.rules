@@ -7,8 +7,25 @@ service cloud.firestore {
         && request.auth.uid == 'FGmxXhvrahb1KGV9NCy6oikmSfH3';
     }
 
+    function isScanner() {
+      return request.auth != null
+        && request.auth.uid == '9GPk0CuI60fz8oQ7FAtPvcX49VI3';
+    }
+
     match /events/{eventId} {
       allow read, create, update, delete: if isAdmin();
+      allow get: if isScanner();
+
+      match /tickets/{ticketId} {
+        allow get: if isScanner();
+        allow update: if isScanner()
+          && resource.data.status == 'active'
+          && request.resource.data.status == 'used'
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'usedAt', 'updatedAt'])
+          && request.resource.data.usedAt == request.time
+          && request.resource.data.updatedAt == request.time;
+      }
 
       match /{document=**} {
         allow read, create, update, delete: if isAdmin();

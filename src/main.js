@@ -30,6 +30,8 @@ import {
 import { firebaseConfig } from "./firebase-config.js";
 
 const ADMIN_EMAIL = "matiasromanruiz33@gmail.com";
+const ADMIN_UID = "FGmxXhvrahb1KGV9NCy6oikmSfH3";
+const SCANNER_UID = "9GPk0CuI60fz8oQ7FAtPvcX49VI3";
 const TICKET_PREFIX = "SN2";
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -42,6 +44,7 @@ const loadScanner = () => (scannerModulePromise ||= import("html5-qrcode").then(
 
 const state = {
   user: null,
+  role: null,
   events: [],
   event: null,
   participants: [],
@@ -65,12 +68,17 @@ document.querySelector("#app").innerHTML = `
     <div class="login-card">
       <p class="eyebrow">PANEL PRIVADO</p>
       <h1>Control de<br>acceso.</h1>
-      <p class="login-copy">Administra eventos, sorteos y entradas únicas desde cualquier dispositivo.</p>
+      <p class="login-copy">Ingresa con tu cuenta autorizada para administrar o validar entradas.</p>
       <form id="login-form">
-        <label>Usuario autorizado</label>
-        <div class="fixed-email">${ADMIN_EMAIL}</div>
+        <label for="login-email">Correo autorizado</label>
+        <input id="login-email" type="email" autocomplete="username" value="${ADMIN_EMAIL}" required />
         <label for="login-password">Contraseña</label>
-        <input id="login-password" type="password" autocomplete="current-password" placeholder="Ingresa tu contraseña" required />
+        <div class="password-field">
+          <input id="login-password" type="password" autocomplete="current-password" placeholder="Ingresa tu contraseña" required />
+          <button class="password-toggle" id="toggle-password" type="button" aria-label="Mostrar contraseña" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+          </button>
+        </div>
         <p class="form-error" id="login-error" role="alert"></p>
         <button class="primary-button" id="login-button" type="submit"><span>Ingresar al panel</span><span>→</span></button>
       </form>
@@ -276,7 +284,9 @@ const elements = {
   loginScreen: document.querySelector("#login-screen"),
   appShell: document.querySelector("#app-shell"),
   loginForm: document.querySelector("#login-form"),
+  loginEmail: document.querySelector("#login-email"),
   loginPassword: document.querySelector("#login-password"),
+  togglePassword: document.querySelector("#toggle-password"),
   loginError: document.querySelector("#login-error"),
   eventGrid: document.querySelector("#event-grid"),
   eventListScreen: document.querySelector("#event-list-screen"),
@@ -604,6 +614,7 @@ function renderTickets() {
 }
 
 function switchMainView(view) {
+  if (state.role === "scanner") view = "scanner";
   state.activeView = view;
   document.querySelectorAll(".main-view").forEach((panel) => panel.classList.toggle("active", panel.id === `${view}-view`));
   document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
@@ -1104,6 +1115,7 @@ async function redeemTicket({ eventId, ticketId, code }) {
       if (ticket.code !== code) return { status: "invalid" };
       if (ticket.status === "used") return { status: "used", ticket, eventName: eventSnapshot.data().name };
       if (ticket.status === "revoked") return { status: "revoked", ticket, eventName: eventSnapshot.data().name };
+      if (ticket.status !== "active") return { status: "invalid" };
       transaction.update(ticketRef, { status: "used", usedAt: serverTimestamp(), updatedAt: serverTimestamp() });
       return { status: "valid", ticket, eventName: eventSnapshot.data().name };
     });
@@ -1162,11 +1174,14 @@ async function handleLogin(event) {
   elements.loginError.textContent = "";
   setBusy(button, true, "Verificando...");
   try {
-    await signInWithEmailAndPassword(auth, ADMIN_EMAIL, elements.loginPassword.value);
-    elements.loginForm.reset();
+    await signInWithEmailAndPassword(auth, elements.loginEmail.value.trim().toLowerCase(), elements.loginPassword.value);
+    elements.loginPassword.value = "";
+    elements.loginPassword.type = "password";
+    elements.togglePassword.setAttribute("aria-label", "Mostrar contraseña");
+    elements.togglePassword.setAttribute("aria-pressed", "false");
   } catch (error) {
     console.error(error);
-    elements.loginError.textContent = "Contraseña incorrecta o acceso no disponible.";
+    elements.loginError.textContent = "Correo, contraseña o acceso incorrectos.";
   } finally {
     setBusy(button, false, "Ingresar al panel");
   }
@@ -1178,10 +1193,20 @@ async function handleLogout() {
 }
 
 elements.loginForm.addEventListener("submit", handleLogin);
+elements.togglePassword.addEventListener("click", () => {
+  const visible = elements.loginPassword.type === "text";
+  elements.loginPassword.type = visible ? "password" : "text";
+  elements.togglePassword.setAttribute("aria-label", visible ? "Mostrar contraseña" : "Ocultar contraseña");
+  elements.togglePassword.setAttribute("aria-pressed", String(!visible));
+});
 document.querySelector("#logout-button").addEventListener("click", handleLogout);
 document.querySelector(".nav-home").addEventListener("click", () => {
-  switchMainView("events");
-  backToEvents();
+  if (state.role === "admin") {
+    switchMainView("events");
+    backToEvents();
+  } else {
+    switchMainView("scanner");
+  }
 });
 document.querySelectorAll(".nav-button").forEach((button) => button.addEventListener("click", () => switchMainView(button.dataset.view)));
 document.querySelector("#new-event-button").addEventListener("click", openNewEventDialog);
@@ -1235,18 +1260,39 @@ document.addEventListener("click", (event) => {
 });
 
 setPersistence(auth, browserLocalPersistence).catch(console.error);
-onAuthStateChanged(auth, (user) => {
-  state.user = user;
-  if (user) {
-    elements.loginScreen.hidden = true;
-    elements.appShell.hidden = false;
-    subscribeEvents();
-  } else {
-    state.eventUnsubscribe?.();
-    closeEventSubscriptions();
-    state.events = [];
-    state.event = null;
+onAuthStateChanged(auth, async (user) => {
+  state.eventUnsubscribe?.();
+  state.eventUnsubscribe = null;
+  closeEventSubscriptions();
+  state.events = [];
+  state.event = null;
+  state.user = null;
+  state.role = null;
+
+  if (!user) {
     elements.appShell.hidden = true;
     elements.loginScreen.hidden = false;
+    return;
+  }
+
+  const role = user.uid === ADMIN_UID ? "admin" : user.uid === SCANNER_UID ? "scanner" : null;
+  if (!role) {
+    elements.loginError.textContent = "Esta cuenta no tiene acceso autorizado.";
+    await signOut(auth);
+    return;
+  }
+
+  state.user = user;
+  state.role = role;
+  elements.loginScreen.hidden = true;
+  elements.appShell.hidden = false;
+  document.querySelector('[data-view="events"]').hidden = role !== "admin";
+  document.querySelector(".nav-home").setAttribute("aria-label", role === "admin" ? "Ir a eventos" : "Ir al escáner");
+
+  if (role === "admin") {
+    switchMainView("events");
+    subscribeEvents();
+  } else {
+    switchMainView("scanner");
   }
 });
