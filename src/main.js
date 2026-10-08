@@ -60,8 +60,7 @@ document.querySelector("#app").innerHTML = `
 
   <section class="login-screen" id="login-screen">
     <div class="login-brand">
-      <span class="brand-mark" aria-hidden="true"><img src="./logo.png" alt="" /></span>
-      <span>SORTEO<br><b>NOCTURNO</b></span>
+      <span class="brand-mark"><img src="./logo.png" alt="Mirage Producciones" /></span>
     </div>
     <div class="login-card">
       <p class="eyebrow">PANEL PRIVADO</p>
@@ -82,7 +81,6 @@ document.querySelector("#app").innerHTML = `
     <header class="topbar">
       <button class="brand nav-home" type="button" aria-label="Ir a eventos">
         <span class="brand-mark" aria-hidden="true"><img src="./logo.png" alt="" /></span>
-        <span>SORTEO<br><b>NOCTURNO</b></span>
       </button>
       <nav class="main-nav" aria-label="Navegación principal">
         <button class="nav-button active" type="button" data-view="events">Eventos</button>
