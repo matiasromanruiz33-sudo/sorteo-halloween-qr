@@ -29,7 +29,6 @@ import {
 } from "firebase/firestore";
 import { firebaseConfig } from "./firebase-config.js";
 
-const ADMIN_EMAIL = "matiasromanruiz33@gmail.com";
 const ADMIN_UID = "FGmxXhvrahb1KGV9NCy6oikmSfH3";
 const SCANNER_UID = "9GPk0CuI60fz8oQ7FAtPvcX49VI3";
 const TICKET_PREFIX = "SN2";
@@ -71,7 +70,7 @@ document.querySelector("#app").innerHTML = `
       <p class="login-copy">Ingresa con tu cuenta autorizada para administrar o validar entradas.</p>
       <form id="login-form">
         <label for="login-email">Correo autorizado</label>
-        <input id="login-email" type="email" autocomplete="username" value="${ADMIN_EMAIL}" required />
+        <input id="login-email" type="email" autocomplete="username" placeholder="Ingresa tu correo" required />
         <label for="login-password">Contraseña</label>
         <div class="password-field">
           <input id="login-password" type="password" autocomplete="current-password" placeholder="Ingresa tu contraseña" required />
