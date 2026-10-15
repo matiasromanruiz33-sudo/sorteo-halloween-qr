@@ -36,6 +36,8 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .login-card h1, .page-heading h1, .event-heading h1, .scanner-heading h1 { margin: 0; font: 700 clamp(52px, 7vw, 92px)/.88 "Oswald", sans-serif; text-transform: uppercase; }
 .login-copy { max-width: 390px; margin: 27px 0 40px; color: var(--muted); line-height: 1.7; }
 .login-card form { display: grid; }
+.verification-panel { padding: 30px 0; color: #b4b9a5; line-height: 1.9; }
+.verification-panel .outline-button { margin: 10px 0; width: 100%; }
 #login-email { margin-bottom: 24px; }
 .password-field { position: relative; margin-bottom: 7px; }
 .password-field input { margin-bottom: 0; padding-right: 58px; }

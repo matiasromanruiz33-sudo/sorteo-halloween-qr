@@ -14,11 +14,15 @@ import {
   setPersistence,
   signInWithEmailAndPassword,
   signOut,
+  sendEmailVerification,
+  reload,
+  connectAuthEmulator,
 } from "firebase/auth";
 import {
   collection,
   doc,
   getDocs,
+  getDoc,
   getFirestore,
   increment,
   onSnapshot,
@@ -26,17 +30,26 @@ import {
   serverTimestamp,
   updateDoc,
   writeBatch,
+  connectFirestoreEmulator,
 } from "firebase/firestore";
 import { firebaseConfig } from "./firebase-config.js";
+import { OPERATOR_UID } from "./finance-core.js";
 
 const ADMIN_UID = "FGmxXhvrahb1KGV9NCy6oikmSfH3";
 const SCANNER_UID = "9GPk0CuI60fz8oQ7FAtPvcX49VI3";
 const TICKET_PREFIX = "SN2";
-const app = initializeApp(firebaseConfig);
+const useEmulators = import.meta.env.DEV && import.meta.env.VITE_USE_EMULATORS === "true";
+const app = initializeApp(useEmulators ? { ...firebaseConfig, projectId: "demo-mirage-finance", apiKey: "demo-key" } : firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+if (useEmulators) {
+  connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+  connectFirestoreEmulator(db, "127.0.0.1", 8085);
+}
 let qrModulePromise;
 let scannerModulePromise;
+let financeModule;
+let authVersion = 0;
 
 const loadQrCode = () => (qrModulePromise ||= import("qrcode").then((module) => module.default));
 const loadScanner = () => (scannerModulePromise ||= import("html5-qrcode").then((module) => module.Html5Qrcode));
@@ -85,6 +98,14 @@ document.querySelector("#app").innerHTML = `
         <p class="form-error" id="login-error" role="alert"></p>
         <button class="primary-button" id="login-button" type="submit"><span>Ingresar al panel</span><span>→</span></button>
       </form>
+      <div class="verification-panel" id="verification-panel" hidden>
+        <h2>Verifica tu correo</h2>
+        <p>La cuenta operativa requiere confirmar el enlace enviado a <b>vmc.ecuador@gmail.com</b>. Revisa también la carpeta de correo no deseado.</p>
+        <button class="outline-button" id="verification-refresh" type="button">Ya verifiqué mi correo</button>
+        <button class="outline-button" id="verification-send" type="button">Reenviar enlace de verificación</button>
+        <button class="outline-button" id="verification-logout" type="button">Volver al inicio de sesión</button>
+        <p id="verification-message" role="status"></p>
+      </div>
     </div>
   </section>
 
@@ -96,6 +117,7 @@ document.querySelector("#app").innerHTML = `
       <nav class="main-nav" aria-label="Navegación principal">
         <button class="nav-button active" type="button" data-view="events">Eventos</button>
         <button class="nav-button" type="button" data-view="scanner">Escáner</button>
+        <button class="nav-button" type="button" data-view="finance" hidden>Gestión</button>
       </nav>
       <button class="session-button" id="logout-button" type="button"><span class="online-dot"></span> Cerrar sesión</button>
     </header>
@@ -182,6 +204,8 @@ document.querySelector("#app").innerHTML = `
           </section>
         </div>
       </section>
+
+      <section class="main-view" id="finance-view"></section>
 
       <section class="main-view" id="scanner-view">
         <div class="scanner-heading">
@@ -618,6 +642,7 @@ function renderTickets() {
 
 function switchMainView(view) {
   if (state.role === "scanner") view = "scanner";
+  if (state.role === "operator") view = "finance";
   state.activeView = view;
   document.querySelectorAll(".main-view").forEach((panel) => panel.classList.toggle("active", panel.id === `${view}-view`));
   document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
@@ -1208,7 +1233,7 @@ document.querySelector(".nav-home").addEventListener("click", () => {
     switchMainView("events");
     backToEvents();
   } else {
-    switchMainView("scanner");
+    switchMainView(state.role === "operator" ? "finance" : "scanner");
   }
 });
 document.querySelectorAll(".nav-button").forEach((button) => button.addEventListener("click", () => switchMainView(button.dataset.view)));
@@ -1264,6 +1289,8 @@ document.addEventListener("click", (event) => {
 
 setPersistence(auth, browserLocalPersistence).catch(console.error);
 onAuthStateChanged(auth, async (user) => {
+  const version = ++authVersion;
+  financeModule?.stop();
   state.eventUnsubscribe?.();
   state.eventUnsubscribe = null;
   closeEventSubscriptions();
@@ -1271,6 +1298,8 @@ onAuthStateChanged(auth, async (user) => {
   state.event = null;
   state.user = null;
   state.role = null;
+  elements.loginForm.hidden = false;
+  document.querySelector("#verification-panel").hidden = true;
 
   if (!user) {
     elements.appShell.hidden = true;
@@ -1278,24 +1307,80 @@ onAuthStateChanged(auth, async (user) => {
     return;
   }
 
-  const role = user.uid === ADMIN_UID ? "admin" : user.uid === SCANNER_UID ? "scanner" : null;
+  const role = user.uid === ADMIN_UID ? "admin" : user.uid === SCANNER_UID ? "scanner" : user.uid === OPERATOR_UID ? "operator" : null;
   if (!role) {
     elements.loginError.textContent = "Esta cuenta no tiene acceso autorizado.";
     await signOut(auth);
     return;
   }
 
+  if (role === "operator" && !user.emailVerified) {
+    elements.appShell.hidden = true;
+    elements.loginScreen.hidden = false;
+    elements.loginForm.hidden = true;
+    document.querySelector("#verification-panel").hidden = false;
+    return;
+  }
+
+  if (role === "operator") {
+    try {
+      const profile = await getDoc(doc(db, "users", user.uid));
+      if (!profile.exists() || !profile.data().active) {
+        elements.loginError.textContent = "El organizador ha desactivado el acceso operativo.";
+        await signOut(auth);
+        return;
+      }
+    } catch (error) {
+      console.error(error);
+      elements.loginError.textContent = "No se pudo comprobar el permiso. Intenta ingresar nuevamente.";
+      await signOut(auth);
+      return;
+    }
+  }
+  if (version !== authVersion) return;
+
   state.user = user;
   state.role = role;
   elements.loginScreen.hidden = true;
   elements.appShell.hidden = false;
   document.querySelector('[data-view="events"]').hidden = role !== "admin";
-  document.querySelector(".nav-home").setAttribute("aria-label", role === "admin" ? "Ir a eventos" : "Ir al escáner");
+  document.querySelector('[data-view="scanner"]').hidden = role === "operator";
+  document.querySelector('[data-view="finance"]').hidden = role === "scanner";
+  document.querySelector(".nav-home").setAttribute("aria-label", role === "admin" ? "Ir a eventos" : role === "operator" ? "Ir a gestión" : "Ir al escáner");
+
+  if (role !== "scanner") {
+    const { createFinanceModule } = await import("./finance.js");
+    if (version !== authVersion) return;
+    financeModule ||= createFinanceModule({ root: document.querySelector("#finance-view"), db, notify: showToast });
+    financeModule.start(user, role);
+  }
 
   if (role === "admin") {
+    backToEvents();
     switchMainView("events");
     subscribeEvents();
   } else {
-    switchMainView("scanner");
+    switchMainView(role === "operator" ? "finance" : "scanner");
   }
+});
+
+document.querySelector("#verification-logout").addEventListener("click", () => signOut(auth));
+document.querySelector("#verification-refresh").addEventListener("click", async () => {
+  const message = document.querySelector("#verification-message");
+  try {
+    if (!auth.currentUser) return;
+    await reload(auth.currentUser);
+    await auth.currentUser.getIdToken(true);
+    if (auth.currentUser.emailVerified) window.location.reload();
+    else message.textContent = "El correo todavía no está verificado. Abre primero el enlace recibido.";
+  } catch { message.textContent = "No se pudo actualizar. Comprueba tu conexión."; }
+});
+document.querySelector("#verification-send").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    await sendEmailVerification(auth.currentUser);
+    document.querySelector("#verification-message").textContent = "Enlace enviado. Revisa tu bandeja de entrada y correo no deseado.";
+  } catch { document.querySelector("#verification-message").textContent = "No se pudo reenviar. Espera unos minutos e inténtalo nuevamente."; }
+  finally { button.disabled = false; }
 });

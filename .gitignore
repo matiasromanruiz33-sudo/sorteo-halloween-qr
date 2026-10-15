@@ -9,3 +9,5 @@ validador.html
 resultado_sorteo.txt
 codigos_ganadores.csv
 qr/
+*-debug.log
+test-results/

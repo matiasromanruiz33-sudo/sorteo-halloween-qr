@@ -12,6 +12,234 @@ service cloud.firestore {
         && request.auth.uid == '9GPk0CuI60fz8oQ7FAtPvcX49VI3';
     }
 
+    function canOperate(eventId) {
+      return isAdmin() || (request.auth != null
+        && request.auth.uid == '8ViPQPIFNpYuSkzYDwLD3waQNPn1'
+        && request.auth.token.email_verified == true
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true
+        && request.auth.uid in get(/databases/$(database)/documents/financeEvents/$(eventId)).data.assignedUids);
+    }
+
+    match /users/{uid} {
+      allow read: if isAdmin() || (request.auth != null && request.auth.uid == uid);
+      allow create, update: if isAdmin() && uid == '8ViPQPIFNpYuSkzYDwLD3waQNPn1'
+        && request.resource.data.keys().hasOnly(['email', 'role', 'active', 'updatedAt'])
+        && request.resource.data.email == 'vmc.ecuador@gmail.com'
+        && request.resource.data.role == 'operator' && request.resource.data.active is bool
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    match /userAudit/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+    }
+
+    match /financeEvents/{eventId} {
+      allow read: if isAdmin() || (request.auth != null
+        && request.auth.uid == '8ViPQPIFNpYuSkzYDwLD3waQNPn1'
+        && request.auth.token.email_verified == true
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true
+        && request.auth.uid in resource.data.assignedUids);
+      allow create, update: if isAdmin()
+        && request.resource.data.ownerUid == 'FGmxXhvrahb1KGV9NCy6oikmSfH3'
+        && request.resource.data.sourceEventId == eventId
+        && request.resource.data.budgetCents is int && request.resource.data.budgetCents >= 0
+        && request.resource.data.assignedUids is list
+        && request.resource.data.assignedUids.hasOnly(['8ViPQPIFNpYuSkzYDwLD3waQNPn1'])
+        && request.resource.data.allowDiscounts is bool && request.resource.data.allowRefunds is bool
+        && request.resource.data.updatedAt == request.time;
+
+      function operationPath(id) {
+        return /databases/$(database)/documents/financeEvents/$(eventId)/operations/$(id);
+      }
+      function productPath(id) {
+        return /databases/$(database)/documents/financeEvents/$(eventId)/products/$(id);
+      }
+      function balancePath() {
+        return /databases/$(database)/documents/financeEvents/$(eventId)/balances/current;
+      }
+      function payablePath(id) {
+        return /databases/$(database)/documents/financeEvents/$(eventId)/payables/$(id);
+      }
+      function beforeProduct(id) {
+        return exists(productPath(id)) ? get(productPath(id)).data
+          : { 'stock': 0, 'sold': 0, 'inventoryValueCents': 0 };
+      }
+      function cashDelta(op) {
+        return op.kind in ['purchase', 'expense', 'payment', 'refund', 'cashOut'] ? -op.paidCents : op.paidCents;
+      }
+      function basicOperation(op) {
+        return op.keys().hasOnly(['kind', 'productId', 'originalId', 'concept', 'category', 'date', 'method', 'payee', 'note', 'details', 'attachmentId', 'actorUid', 'actorEmail', 'createdAt', 'quantity', 'amountCents', 'paidCents', 'costCents', 'unitPriceCents', 'discountCents', 'stockDelta', 'valueDelta', 'soldDelta'])
+          && op.actorUid == request.auth.uid && op.actorEmail == request.auth.token.email
+          && op.createdAt == request.time
+          && op.concept is string && op.concept.size() > 0 && op.concept.size() <= 200
+          && op.note is string && op.note.size() <= 3000
+          && op.details is string && op.details.size() <= 8000
+          && op.category is string && op.category.size() <= 100
+          && op.payee is string && op.payee.size() <= 200
+          && op.date is string && op.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && op.method in ['cash', 'transfer', 'card', 'other']
+          && op.amountCents is int && op.amountCents >= 0 && op.amountCents <= 1000000000000
+          && op.paidCents is int && op.paidCents >= 0 && op.paidCents <= op.amountCents
+          && op.quantity is int && op.quantity >= 0 && op.quantity <= 1000000
+          && op.costCents is int && op.costCents >= 0
+          && op.unitPriceCents is int && op.unitPriceCents >= 0
+          && op.discountCents is int && op.discountCents >= 0
+          && op.stockDelta is int && op.valueDelta is int && op.soldDelta is int
+          && op.productId is string && op.originalId is string
+          && (!(op.kind in ['loss', 'damage', 'adjustmentIn', 'adjustmentOut', 'refund', 'cashOut']) || op.note.size() >= 5);
+      }
+      function productTransition(op, id) {
+        let before = beforeProduct(op.productId);
+        let after = getAfter(productPath(op.productId)).data;
+        return after.lastOperationId == id
+          && after.stock == before.stock + op.stockDelta
+          && after.sold == before.sold + op.soldDelta
+          && after.inventoryValueCents == before.inventoryValueCents + op.valueDelta;
+      }
+      function purchaseOrEntry(op) {
+        return op.quantity > 0 && op.originalId == ''
+          && op.costCents == op.quantity * op.unitPriceCents
+          && op.stockDelta == op.quantity && op.valueDelta == op.costCents && op.soldDelta == 0
+          && op.discountCents == 0
+          && ((op.kind == 'purchase' && op.amountCents == op.costCents)
+            || (op.kind == 'adjustmentIn' && op.amountCents == 0 && op.paidCents == 0));
+      }
+      function stockExit(op) {
+        let product = get(productPath(op.productId)).data;
+        return op.quantity > 0 && product.stock >= op.quantity && op.originalId == ''
+          && op.stockDelta == -op.quantity && op.valueDelta == -op.costCents
+          && op.costCents == int(math.round(1.0 * product.inventoryValueCents * op.quantity / product.stock))
+          && ((op.kind == 'sale' && product.status == 'active'
+              && op.unitPriceCents == product.saleCents
+              && op.amountCents == op.quantity * product.saleCents - op.discountCents
+              && op.paidCents == op.amountCents && op.soldDelta == op.quantity
+              && (op.discountCents == 0 || isAdmin() || get(/databases/$(database)/documents/financeEvents/$(eventId)).data.allowDiscounts))
+            || (op.kind in ['loss', 'damage', 'adjustmentOut'] && op.amountCents == 0 && op.paidCents == 0 && op.soldDelta == 0)
+            || (op.kind == 'supplierReturn' && op.amountCents == op.costCents && op.paidCents == op.amountCents && op.soldDelta == 0));
+      }
+      function validRefund(op, id) {
+        let sale = get(operationPath(op.originalId)).data;
+        return id == 'refund_' + op.originalId && sale.kind == 'sale'
+          && (isAdmin() || get(/databases/$(database)/documents/financeEvents/$(eventId)).data.allowRefunds)
+          && op.productId == sale.productId && op.quantity == sale.quantity
+          && op.amountCents == sale.amountCents && op.paidCents == sale.paidCents
+          && op.costCents == sale.costCents && op.method == sale.method
+          && op.stockDelta == sale.quantity && op.valueDelta == sale.costCents && op.soldDelta == -sale.quantity;
+      }
+      function noStock(op) {
+        return op.productId == '' && op.quantity == 0 && op.stockDelta == 0
+          && op.valueDelta == 0 && op.soldDelta == 0 && op.costCents == 0;
+      }
+      function payableCreated(op, id) {
+        return getAfter(payablePath(id)).data.remainingCents == op.amountCents - op.paidCents
+          && getAfter(payablePath(id)).data.lastOperationId == id;
+      }
+      function paymentApplied(op, id) {
+        let original = get(operationPath(op.originalId)).data;
+        return original.kind in ['purchase', 'expense'] && op.paidCents == op.amountCents
+          && get(payablePath(op.originalId)).data.remainingCents >= op.paidCents
+          && getAfter(payablePath(op.originalId)).data.remainingCents == get(payablePath(op.originalId)).data.remainingCents - op.paidCents
+          && getAfter(payablePath(op.originalId)).data.lastOperationId == id;
+      }
+      function kindValid(op, id) {
+        return (op.kind == 'product' && op.productId != '' && op.quantity == 0 && op.stockDelta == 0 && op.valueDelta == 0 && op.soldDelta == 0 && op.amountCents == 0 && op.paidCents == 0 && op.costCents == 0)
+          || (op.kind in ['purchase', 'adjustmentIn'] && purchaseOrEntry(op) && (op.kind != 'purchase' || payableCreated(op, id)))
+          || (op.kind in ['sale', 'loss', 'damage', 'adjustmentOut', 'supplierReturn'] && stockExit(op))
+          || (op.kind == 'refund' && validRefund(op, id))
+          || (noStock(op) && op.amountCents > 0 && (
+            (op.kind in ['funding', 'cashIn', 'cashOut'] && op.paidCents == op.amountCents && op.originalId == '')
+            || (op.kind == 'expense' && op.originalId == '' && payableCreated(op, id))
+            || (op.kind == 'payment' && paymentApplied(op, id))));
+      }
+      function balanceApplied(op, id) {
+        let before = exists(balancePath()) ? get(balancePath()).data : { 'cash': 0, 'transfer': 0, 'card': 0, 'other': 0 };
+        let after = getAfter(balancePath()).data;
+        let delta = cashDelta(op);
+        return after.lastOperationId == id
+          && after.cash == before.cash + (op.method == 'cash' ? delta : 0)
+          && after.transfer == before.transfer + (op.method == 'transfer' ? delta : 0)
+          && after.card == before.card + (op.method == 'card' ? delta : 0)
+          && after.other == before.other + (op.method == 'other' ? delta : 0);
+      }
+
+      match /operations/{id} {
+        allow read: if canOperate(eventId);
+        allow create: if canOperate(eventId) && basicOperation(request.resource.data)
+          && kindValid(request.resource.data, id)
+          // Linked writes validate their own arithmetic. A new operation must
+          // move their lastOperationId too, so it cannot omit either write.
+          && getAfter(balancePath()).data.lastOperationId == id
+          && (request.resource.data.productId == ''
+            || getAfter(productPath(request.resource.data.productId)).data.lastOperationId == id);
+      }
+      match /products/{id} {
+        allow read: if canOperate(eventId);
+        allow create, update: if canOperate(eventId)
+          && request.resource.data.keys().hasOnly(['name', 'category', 'description', 'image', 'supplier', 'status', 'note', 'saleCents', 'costCents', 'stock', 'sold', 'inventoryValueCents', 'createdAt', 'updatedAt', 'actorUid', 'lastOperationId'])
+          && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 100
+          && request.resource.data.stock is int && request.resource.data.stock >= 0
+          && request.resource.data.sold is int && request.resource.data.sold >= 0
+          && request.resource.data.inventoryValueCents is int && request.resource.data.inventoryValueCents >= 0
+          && request.resource.data.saleCents is int && request.resource.data.saleCents >= 0
+          && request.resource.data.costCents is int && request.resource.data.costCents >= 0
+          && request.resource.data.status in ['active', 'inactive']
+          && request.resource.data.updatedAt == request.time && request.resource.data.actorUid == request.auth.uid
+          && !exists(operationPath(request.resource.data.lastOperationId))
+          && getAfter(operationPath(request.resource.data.lastOperationId)).data.productId == id
+          && productTransition(getAfter(operationPath(request.resource.data.lastOperationId)).data, request.resource.data.lastOperationId)
+          && (!exists(productPath(id))
+            || getAfter(operationPath(request.resource.data.lastOperationId)).data.kind == 'product'
+            || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'sold', 'inventoryValueCents', 'lastOperationId', 'updatedAt', 'actorUid']));
+      }
+      match /balances/{id} {
+        allow read: if canOperate(eventId);
+        allow create, update: if id == 'current' && canOperate(eventId)
+          && request.resource.data.keys().hasOnly(['cash', 'transfer', 'card', 'other', 'lastOperationId', 'updatedAt'])
+          && request.resource.data.updatedAt == request.time
+          && !exists(operationPath(request.resource.data.lastOperationId))
+          && balanceApplied(getAfter(operationPath(request.resource.data.lastOperationId)).data, request.resource.data.lastOperationId);
+      }
+      match /payables/{id} {
+        allow read: if canOperate(eventId);
+        allow create, update: if canOperate(eventId)
+          && request.resource.data.keys().hasOnly(['remainingCents', 'lastOperationId', 'updatedAt'])
+          && request.resource.data.remainingCents is int && request.resource.data.remainingCents >= 0
+          && request.resource.data.updatedAt == request.time
+          && !exists(operationPath(request.resource.data.lastOperationId))
+          && ((id == request.resource.data.lastOperationId
+            && getAfter(operationPath(id)).data.kind in ['purchase', 'expense']
+            && payableCreated(getAfter(operationPath(id)).data, id))
+            || (getAfter(operationPath(request.resource.data.lastOperationId)).data.kind == 'payment'
+              && getAfter(operationPath(request.resource.data.lastOperationId)).data.originalId == id
+              && paymentApplied(getAfter(operationPath(request.resource.data.lastOperationId)).data, request.resource.data.lastOperationId)));
+      }
+      match /closures/{id} {
+        allow read: if canOperate(eventId);
+        allow create: if canOperate(eventId) && request.resource.data.actorUid == request.auth.uid
+          && request.resource.data.keys().hasOnly(['expectedCents', 'countedCents', 'differenceCents', 'balanceOperationId', 'note', 'actorUid', 'actorEmail', 'createdAt'])
+          && request.resource.data.actorEmail == request.auth.token.email
+          && request.resource.data.note is string && request.resource.data.note.size() <= 3000
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.countedCents is int && request.resource.data.countedCents >= 0
+          && request.resource.data.expectedCents == (exists(balancePath()) ? get(balancePath()).data.cash : 0)
+          && request.resource.data.balanceOperationId == (exists(balancePath()) ? get(balancePath()).data.lastOperationId : '')
+          && request.resource.data.differenceCents == request.resource.data.countedCents - request.resource.data.expectedCents;
+      }
+      match /attachments/{id} {
+        allow read: if canOperate(eventId);
+        allow create: if canOperate(eventId) && request.resource.data.actorUid == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.data is string && request.resource.data.data.size() <= 450000
+          && request.resource.data.mime in ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+      }
+      match /audit/{id} {
+        allow read: if canOperate(eventId);
+        allow create: if isAdmin() && request.resource.data.actorUid == request.auth.uid && request.resource.data.createdAt == request.time;
+      }
+    }
+
     match /events/{eventId} {
       allow read, create, update, delete: if isAdmin();
       allow get: if isScanner();
