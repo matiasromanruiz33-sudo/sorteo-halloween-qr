@@ -1,7 +1,7 @@
 import "./finance.css";
 import { collection, doc, getDoc, onSnapshot, query, where, setDoc, serverTimestamp, writeBatch } from "firebase/firestore";
 import { OPERATOR_UID, OPERATOR_EMAIL, METHODS, KINDS, DEFAULT_CATEGORIES, money, ecuadorTime, today, escape as h, summarize, cents, units, cashEffect } from "./finance-core.js";
-import { saveFinanceEvent, recordOperation, closeCash, financeRef } from "./finance-store.js";
+import { saveFinanceEvent, recordOperation, closeCash, financeRef, syncFinanceLink } from "./finance-store.js";
 import { prepareReport, downloadExcel, downloadPdf } from "./finance-reports.js";
 
 const sections = [["home", "◫", "Inicio"], ["events", "◇", "Mis eventos"], ["products", "▤", "Productos e inventario"],
@@ -55,8 +55,15 @@ export function createFinanceModule({ root, db, notify }) {
       if (selectedId && !events.some((event) => event.id === selectedId) && !isOwner()) selectedId = "";
       syncEventSubscriptions(); render();
     }, showError));
-    if (isOwner()) unsubscribes.push(onSnapshot(collection(db, "events"), (snapshot) => {
+    if (isOwner()) unsubscribes.push(onSnapshot(collection(db, "events"), async (snapshot) => {
       sourceEvents = snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() })); render();
+      for (const source of sourceEvents) {
+        if (user?.uid !== currentUser.uid || !isOwner()) return;
+        if (!events.some((event) => event.id === source.id)) {
+          try { await syncFinanceLink(db, currentUser, source.id); }
+          catch (error) { if (user?.uid === currentUser.uid) showError(error); }
+        }
+      }
     }, showError));
     unsubscribes.push(onSnapshot(doc(db, "users", OPERATOR_UID), (snapshot) => {
       profile = snapshot.data();
@@ -241,7 +248,7 @@ export function createFinanceModule({ root, db, notify }) {
       ${field("budget", "Presupuesto USD", number(event?.budgetCents), "number", 'min="0" step="0.01" required')}${select("phase", "Estado", phases, event?.phase || "planning")}
       ${field("flyer", "URL de flyer HTTPS (opcional)", event?.flyer?.startsWith("https:") ? event.flyer : "", "url")}${field("flyerFile", "O subir flyer (imagen)", "", "file", 'accept="image/png,image/jpeg,image/webp"')}
       ${field("categories", "Categorías, separadas por coma", (event?.categories || DEFAULT_CATEGORIES).join(", "), "text", 'required maxlength="800"')}
-      <label class="fin-check"><input name="assigned" type="checkbox" ${event?.assignedUids.includes(OPERATOR_UID) ? "checked" : ""} /> Asignar a ${OPERATOR_EMAIL}</label>
+      <label class="fin-check"><input name="assigned" type="checkbox" ${!event || event.assignedUids.includes(OPERATOR_UID) ? "checked" : ""} /> Acceso operativo de ${OPERATOR_EMAIL} (automático al crear el evento)</label>
       <label class="fin-check"><input name="allowDiscounts" type="checkbox" ${event?.allowDiscounts ? "checked" : ""} /> Autorizar descuentos al operador</label>
       <label class="fin-check"><input name="allowRefunds" type="checkbox" ${event?.allowRefunds ? "checked" : ""} /> Autorizar devoluciones / anulaciones</label>`, { action: "configure", eventId: id, source, previousFlyer: event?.flyer || "" });
   }

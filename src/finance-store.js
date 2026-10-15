@@ -3,6 +3,56 @@ import { cashEffect, cents, units, OWNER_UID, OPERATOR_UID, DEFAULT_CATEGORIES }
 
 export const financeRef = (db, eventId, ...path) => doc(db, "financeEvents", eventId, ...path);
 
+function initialFinanceEvent(source) {
+  return {
+    name: source.name, sourceEventId: source.id, ownerUid: OWNER_UID,
+    eventDate: source.eventDate || "", eventTime: "", location: "", organizer: "Mirage Producciones",
+    flyer: "", phase: "planning", budgetCents: 0, categories: DEFAULT_CATEGORIES,
+    assignedUids: [OPERATOR_UID], allowDiscounts: false, allowRefunds: false,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+  };
+}
+
+// Used in the same batch as the original event so VMC sees it immediately.
+export function appendFinanceLink(batch, db, user, source) {
+  if (user.uid !== OWNER_UID) throw new Error("Solo el organizador puede vincular eventos.");
+  const ref = financeRef(db, source.id);
+  batch.set(ref, initialFinanceEvent(source));
+  batch.set(doc(collection(ref, "audit")), {
+    actorUid: user.uid, actorEmail: user.email, createdAt: serverTimestamp(),
+    action: "Evento creado por el organizador y vinculado automáticamente a VMC",
+    before: "{}", after: JSON.stringify({ sourceEventId: source.id, assignedUids: [OPERATOR_UID] }),
+  });
+}
+
+// Backfill only missing links; do not undo an organizer's explicit revocation.
+// eventUpdate keeps organizer edits and financial event details in one commit.
+export async function syncFinanceLink(db, user, eventId, { eventUpdate, assignExisting = false } = {}) {
+  if (user.uid !== OWNER_UID) throw new Error("Solo el organizador puede vincular eventos.");
+  const sourceRef = doc(db, "events", eventId);
+  const ref = financeRef(db, eventId);
+  const auditRef = doc(collection(ref, "audit"));
+  await runTransaction(db, async (tx) => {
+    const [sourceSnapshot, snapshot] = await Promise.all([tx.get(sourceRef), tx.get(ref)]);
+    if (!sourceSnapshot.exists()) return;
+    const source = { id: eventId, ...sourceSnapshot.data(), ...eventUpdate };
+    const previous = snapshot.data();
+    if (eventUpdate) tx.update(sourceRef, { ...eventUpdate, updatedAt: serverTimestamp() });
+    if (!previous) tx.set(ref, initialFinanceEvent(source));
+    else {
+      const changes = {};
+      if (eventUpdate) Object.assign(changes, { name: source.name, eventDate: source.eventDate || "" });
+      if (assignExisting && !previous.assignedUids.includes(OPERATOR_UID)) changes.assignedUids = [...previous.assignedUids, OPERATOR_UID];
+      if (!Object.keys(changes).length) return;
+      tx.update(ref, { ...changes, updatedAt: serverTimestamp() });
+    }
+    tx.set(auditRef, { actorUid: user.uid, actorEmail: user.email, createdAt: serverTimestamp(),
+      action: previous ? eventUpdate ? "Datos del evento sincronizados por el organizador" : "Evento vinculado a VMC por el organizador" : "Evento existente vinculado automáticamente a VMC",
+      before: JSON.stringify(previous || {}), after: JSON.stringify({ eventId, eventUpdate: eventUpdate || null, assigned: !previous || assignExisting || previous.assignedUids.includes(OPERATOR_UID) }),
+    });
+  });
+}
+
 export async function saveFinanceEvent(db, user, source, input) {
   const ref = financeRef(db, source.id);
   const auditRef = doc(collection(ref, "audit"));

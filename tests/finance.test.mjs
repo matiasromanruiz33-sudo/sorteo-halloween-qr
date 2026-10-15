@@ -3,7 +3,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { initializeTestEnvironment, assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
 import { collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, serverTimestamp, writeBatch, query, where } from "firebase/firestore";
-import { saveFinanceEvent, recordOperation, closeCash } from "../src/finance-store.js";
+import { saveFinanceEvent, recordOperation, closeCash, appendFinanceLink, syncFinanceLink } from "../src/finance-store.js";
 import { OWNER_UID, OPERATOR_UID, summarize, inventoryAt } from "../src/finance-core.js";
 
 let env, ownerDb, operatorDb;
@@ -130,4 +130,35 @@ test("period inventory is reconstructed from ledger, not current stock", () => {
     { productId: "x", date: "2026-10-03", stockDelta: 50, valueDelta: 5000 },
   ], "2026-10-02", "2026-10-02");
   assert.equal(rows[0].initial, 100); assert.equal(rows[0].stock, 75); assert.equal(rows[0].inventoryValueCents, 7500);
+});
+
+test("automatic links preserve source data, existing finances and explicit revocations", async () => {
+  const id = "automatic-link-test";
+  const sourceRef = doc(ownerDb, "events", id);
+  const financeRef = doc(ownerDb, "financeEvents", id);
+  const source = { name: "Evento anterior", eventDate: date, participantCount: 21, status: "drawn" };
+  await setDoc(sourceRef, source);
+  await syncFinanceLink(ownerDb, owner, id);
+  assert.deepEqual((await getDoc(sourceRef)).data(), source);
+  assert.deepEqual((await getDoc(financeRef)).data().assignedUids, [OPERATOR_UID]);
+  await updateDoc(financeRef, { budgetCents: 12345, assignedUids: [], updatedAt: serverTimestamp() });
+  const auditBefore = (await getDocs(collection(financeRef, "audit"))).size;
+  await syncFinanceLink(ownerDb, owner, id);
+  assert.equal((await getDocs(collection(financeRef, "audit"))).size, auditBefore);
+  assert.deepEqual((await getDoc(financeRef)).data().assignedUids, []);
+  await syncFinanceLink(ownerDb, owner, id, { eventUpdate: { name: "Nombre actualizado", eventDate: "2026-10-31" } });
+  const updated = (await getDoc(financeRef)).data();
+  assert.equal(updated.name, "Nombre actualizado");
+  assert.equal(updated.eventDate, "2026-10-31");
+  assert.equal(updated.budgetCents, 12345);
+  assert.deepEqual(updated.assignedUids, []);
+  assert.equal((await getDoc(sourceRef)).data().participantCount, 21);
+
+  const batch = writeBatch(ownerDb);
+  const newSource = { id: "atomic-new-event", name: "Nuevo evento", eventDate: date };
+  batch.set(doc(ownerDb, "events", newSource.id), { name: newSource.name, eventDate: date });
+  appendFinanceLink(batch, ownerDb, owner, newSource);
+  await batch.commit();
+  assert.deepEqual((await getDoc(doc(ownerDb, "financeEvents", newSource.id))).data().assignedUids, [OPERATOR_UID]);
+  await assert.rejects(() => syncFinanceLink(operatorDb, operator, id), /Solo el organizador/);
 });

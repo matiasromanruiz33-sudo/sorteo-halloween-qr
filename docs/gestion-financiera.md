@@ -8,15 +8,15 @@
 
 Las contraseñas se entregan por separado y no se guardan en el repositorio.
 
-## Activar un evento y asignarlo
+## Vinculación automática de eventos
 
 1. El organizador crea el evento desde su sección habitual **Eventos**.
-2. En **Gestión → Mis eventos**, selecciona **Habilitar gestión financiera** o **Asignación y configuración**.
-3. Completa presupuesto, fecha/hora de Ecuador, lugar, flyer, organizador y estado.
-4. Marca **Asignar a vmc.ecuador@gmail.com**. Opcionalmente autoriza descuentos y devoluciones. Guarda.
-5. El evento aparece automáticamente en el dashboard del operador. Suprimir la asignación revoca el acceso desde Firestore.
+2. El evento y su espacio de gestión se guardan juntos, vinculado por defecto a **vmc.ecuador@gmail.com**.
+3. VMC lo ve automáticamente al ingresar con el correo verificado; no necesita crear otro evento ni solicitar una asignación manual.
+4. Desde **Gestión → Mis eventos → Configurar evento**, el organizador puede completar presupuesto, lugar, flyer, hora y estado, y autorizar descuentos o devoluciones.
+5. El organizador puede retirar el acceso de VMC explícitamente. El inicio de sesión no revierte esa decisión. Los cambios posteriores de nombre y fecha desde Eventos se sincronizan con el mismo espacio financiero.
 
-No se altera el sorteo, los participantes ni las entradas del evento al habilitarlo. Las finanzas se guardan en `financeEvents/{eventId}`, enlazadas por el ID del evento original. No se asigna ningún evento existente automáticamente.
+No se altera el sorteo, los participantes ni las entradas al vincular un evento existente. Las finanzas se guardan en `financeEvents/{eventId}`, enlazadas por el ID original. Los eventos anteriores sin espacio financiero se vinculan automáticamente al ingresar el organizador; los ya configurados conservan sus importes y permisos.
 
 El selector superior muestra un evento o un resumen de todos los autorizados. Los formularios de registro requieren elegir un evento concreto. En **Configuración**, el organizador puede desactivar globalmente el perfil operativo y editar categorías y permisos por evento.
 

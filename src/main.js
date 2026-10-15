@@ -34,6 +34,7 @@ import {
 } from "firebase/firestore";
 import { firebaseConfig } from "./firebase-config.js";
 import { OPERATOR_UID } from "./finance-core.js";
+import { appendFinanceLink, syncFinanceLink } from "./finance-store.js";
 
 const ADMIN_UID = "FGmxXhvrahb1KGV9NCy6oikmSfH3";
 const SCANNER_UID = "9GPk0CuI60fz8oQ7FAtPvcX49VI3";
@@ -718,12 +719,11 @@ async function saveEvent(event) {
   setBusy(button, true, "Guardando...");
   try {
     if (editId) {
-      await updateDoc(doc(db, "events", editId), {
+      await syncFinanceLink(db, state.user, editId, { eventUpdate: {
         name,
         eventDate,
         ...(state.event.status === "drawn" ? {} : { winnerCount }),
-        updatedAt: serverTimestamp(),
-      });
+      } });
       showToast("Evento actualizado.");
     } else {
       const eventRef = doc(collection(db, "events"));
@@ -738,6 +738,7 @@ async function saveEvent(event) {
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+      appendFinanceLink(batch, db, state.user, { id: eventRef.id, name, eventDate });
       names.forEach((participantName) => {
         const participantRef = doc(collection(db, "events", eventRef.id, "participants"));
         batch.set(participantRef, {
@@ -749,7 +750,7 @@ async function saveEvent(event) {
         });
       });
       await batch.commit();
-      showToast(`${names.length} participantes registrados.`);
+      showToast(`${names.length} participantes registrados. Evento vinculado a VMC.`);
       elements.eventDialog.close();
       openEvent({
         id: eventRef.id,
