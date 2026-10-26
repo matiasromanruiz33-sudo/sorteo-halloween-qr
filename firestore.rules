@@ -20,13 +20,57 @@ service cloud.firestore {
         && request.auth.uid in get(/databases/$(database)/documents/financeEvents/$(eventId)).data.assignedUids);
     }
 
+    function knownUser() {
+      return request.auth != null && request.auth.uid in [
+        'FGmxXhvrahb1KGV9NCy6oikmSfH3', '9GPk0CuI60fz8oQ7FAtPvcX49VI3', '8ViPQPIFNpYuSkzYDwLD3waQNPn1'];
+    }
+    function auditPath(id) { return /databases/$(database)/documents/systemAudit/$(id); }
+    function audited(id, eventId) {
+      let log = getAfter(auditPath(id)).data;
+      return !exists(auditPath(id)) && log.actorUid == request.auth.uid
+        && log.eventId == eventId && log.createdAt == request.time && log.outcome == 'success';
+    }
+    match /systemAudit/{id} {
+      allow read: if isAdmin();
+      allow create: if knownUser()
+        && request.resource.data.keys().hasOnly(['actorUid', 'actorEmail', 'role', 'createdAt', 'eventId', 'eventName', 'module', 'action', 'outcome', 'targetPath', 'summary', 'beforeJson', 'afterJson', 'origin', 'schemaVersion'])
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.actorEmail == request.auth.token.email
+        && request.resource.data.role == (isAdmin() ? 'admin' : isScanner() ? 'scanner' : 'operator')
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.eventId is string && request.resource.data.eventId.size() <= 150
+        && request.resource.data.eventName is string && request.resource.data.eventName.size() <= 160
+        && request.resource.data.action is string && request.resource.data.action.size() <= 100
+        && request.resource.data.module in ['events', 'participants', 'tickets', 'activity']
+        && request.resource.data.outcome in ['success', 'rejected', 'error']
+        && request.resource.data.targetPath is string && request.resource.data.targetPath.size() <= 600
+        && request.resource.data.summary is string && request.resource.data.summary.size() <= 500
+        && request.resource.data.beforeJson is string && request.resource.data.beforeJson.size() <= 240000
+        && request.resource.data.afterJson is string && request.resource.data.afterJson.size() <= 240000
+        && request.resource.data.origin == 'application' && request.resource.data.schemaVersion == 1
+        && (isAdmin()
+          || (isScanner() && (request.resource.data.module == 'activity'
+            && request.resource.data.action in ['session.open', 'session.logout', 'camera.start', 'camera.stop', 'qr.reject', 'system.error']
+            || request.resource.data.module == 'tickets' && request.resource.data.action == 'qr.redeem'
+              && request.resource.data.targetPath == 'events/' + request.resource.data.eventId + '/tickets/' + request.resource.data.targetPath.split('/')[3]
+              && getAfter(/databases/$(database)/documents/events/$(request.resource.data.eventId)/tickets/$(request.resource.data.targetPath.split('/')[3])).data.auditId == id))
+          || (request.auth.uid == '8ViPQPIFNpYuSkzYDwLD3waQNPn1'
+            && request.resource.data.module == 'activity'
+            && request.resource.data.action in ['session.open', 'session.logout', 'session.verification_required', 'session.verification_sent', 'finance.export', 'finance.error', 'attachment.download', 'system.error']
+            && (request.resource.data.eventId == '' || canOperate(request.resource.data.eventId))));
+    }
+
     match /users/{uid} {
       allow read: if isAdmin() || (request.auth != null && request.auth.uid == uid);
       allow create, update: if isAdmin() && uid == '8ViPQPIFNpYuSkzYDwLD3waQNPn1'
-        && request.resource.data.keys().hasOnly(['email', 'role', 'active', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['email', 'role', 'active', 'updatedAt', 'auditId'])
         && request.resource.data.email == 'vmc.ecuador@gmail.com'
         && request.resource.data.role == 'operator' && request.resource.data.active is bool
-        && request.resource.data.updatedAt == request.time;
+        && request.resource.data.updatedAt == request.time
+        && !exists(/databases/$(database)/documents/userAudit/$(request.resource.data.auditId))
+        && getAfter(/databases/$(database)/documents/userAudit/$(request.resource.data.auditId)).data.actorUid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/userAudit/$(request.resource.data.auditId)).data.subjectUid == uid
+        && getAfter(/databases/$(database)/documents/userAudit/$(request.resource.data.auditId)).data.createdAt == request.time;
     }
 
     match /userAudit/{id} {
@@ -48,7 +92,10 @@ service cloud.firestore {
         && request.resource.data.assignedUids is list
         && request.resource.data.assignedUids.hasOnly(['8ViPQPIFNpYuSkzYDwLD3waQNPn1'])
         && request.resource.data.allowDiscounts is bool && request.resource.data.allowRefunds is bool
-        && request.resource.data.updatedAt == request.time;
+        && request.resource.data.updatedAt == request.time
+        && !exists(/databases/$(database)/documents/financeEvents/$(eventId)/audit/$(request.resource.data.configAuditId))
+        && getAfter(/databases/$(database)/documents/financeEvents/$(eventId)/audit/$(request.resource.data.configAuditId)).data.actorUid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/financeEvents/$(eventId)/audit/$(request.resource.data.configAuditId)).data.createdAt == request.time;
 
       function operationPath(id) {
         return /databases/$(database)/documents/financeEvents/$(eventId)/operations/$(id);
@@ -241,7 +288,9 @@ service cloud.firestore {
     }
 
     match /events/{eventId} {
-      allow read, create, update, delete: if isAdmin();
+      allow read: if isAdmin();
+      allow create, update: if isAdmin() && audited(request.resource.data.auditId, eventId);
+      allow delete: if isAdmin() && audited('delete_events_' + eventId, eventId);
       allow get: if isScanner();
 
       match /tickets/{ticketId} {
@@ -250,13 +299,18 @@ service cloud.firestore {
           && resource.data.status == 'active'
           && request.resource.data.status == 'used'
           && request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['status', 'usedAt', 'updatedAt'])
+             .hasOnly(['status', 'usedAt', 'updatedAt', 'auditId'])
           && request.resource.data.usedAt == request.time
-          && request.resource.data.updatedAt == request.time;
+          && request.resource.data.updatedAt == request.time
+          && audited(request.resource.data.auditId, eventId)
+          && getAfter(auditPath(request.resource.data.auditId)).data.action == 'qr.redeem';
       }
 
-      match /{document=**} {
-        allow read, create, update, delete: if isAdmin();
+      match /{kind}/{id} {
+        allow read: if isAdmin();
+        allow create, update: if isAdmin() && audited(request.resource.data.auditId, eventId);
+        allow delete: if isAdmin()
+          && audited(getAfter(/databases/$(database)/documents/events/$(eventId)).data.auditId, eventId);
       }
     }
   }

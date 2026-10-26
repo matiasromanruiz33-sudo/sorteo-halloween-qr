@@ -3,6 +3,7 @@ import { collection, doc, getDoc, onSnapshot, query, where, setDoc, serverTimest
 import { OPERATOR_UID, OPERATOR_EMAIL, METHODS, KINDS, DEFAULT_CATEGORIES, money, ecuadorTime, today, escape as h, summarize, cents, units, cashEffect } from "./finance-core.js";
 import { saveFinanceEvent, recordOperation, closeCash, financeRef, syncFinanceLink } from "./finance-store.js";
 import { prepareReport, downloadExcel, downloadPdf } from "./finance-reports.js";
+import { tryActivity } from "./audit-store.js";
 
 const sections = [["home", "◫", "Inicio"], ["events", "◇", "Mis eventos"], ["products", "▤", "Productos e inventario"],
   ["funding", "+", "Inversiones"], ["expenses", "↗", "Gastos"], ["sales", "$", "Ventas"], ["cash", "⇄", "Control de caja"],
@@ -349,7 +350,12 @@ export function createFinanceModule({ root, db, notify }) {
         }, context.requestId);
       }
       dialog.close(); notify("Registro guardado y sincronizado.");
-    } catch (error) { console.error(error); dialog.querySelector("#fin-modal-error").textContent = error.code === "permission-denied" ? "No tienes permiso para esta operación. Verifica la asignación y las autorizaciones del evento." : error.message; }
+    } catch (error) {
+      console.error(error);
+      void tryActivity(db, user, { action: "finance.error", eventId: context.eventId, eventName: events.find((e) => e.id === context.eventId)?.name || "", outcome: "error",
+        summary: "Operación financiera no confirmada", after: { operation: context.kind || context.action, errorCode: error.code || error.name } });
+      dialog.querySelector("#fin-modal-error").textContent = error.code === "permission-denied" ? "No tienes permiso para esta operación. Verifica la asignación y las autorizaciones del evento." : error.message;
+    }
     finally { submit.disabled = false; }
   }
 
@@ -381,6 +387,7 @@ export function createFinanceModule({ root, db, notify }) {
     const response = await fetch(attachment.data);
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a"); link.href = url; link.download = attachment.name; link.click();
+    void tryActivity(db, user, { action: "attachment.download", eventId: op.eventId, eventName: op.eventName, summary: `Descarga de comprobante: ${attachment.name}`, targetPath: `financeEvents/${op.eventId}/attachments/${op.attachmentId}` });
     setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
 
@@ -420,8 +427,9 @@ export function createFinanceModule({ root, db, notify }) {
       } else if (action === "toggle-access") {
         if (!isOwner() || !confirm(`${profile?.active ? "Desactivar" : "Activar"} el acceso operativo de ${OPERATOR_EMAIL}?`)) return;
         const batch = writeBatch(db);
-        batch.set(doc(db, "users", OPERATOR_UID), { email: OPERATOR_EMAIL, role: "operator", active: !profile?.active, updatedAt: serverTimestamp() });
-        batch.set(doc(collection(db, "userAudit")), { action: profile?.active ? "Acceso desactivado" : "Acceso activado", subjectUid: OPERATOR_UID, actorUid: user.uid, createdAt: serverTimestamp() });
+        const auditRef = doc(collection(db, "userAudit"));
+        batch.set(doc(db, "users", OPERATOR_UID), { email: OPERATOR_EMAIL, role: "operator", active: !profile?.active, auditId: auditRef.id, updatedAt: serverTimestamp() });
+        batch.set(auditRef, { action: profile?.active ? "Acceso desactivado" : "Acceso activado", subjectUid: OPERATOR_UID, actorUid: user.uid, actorEmail: user.email, createdAt: serverTimestamp(), before: JSON.stringify({ active: Boolean(profile?.active) }), after: JSON.stringify({ active: !profile?.active }) });
         await batch.commit(); notify("Permiso actualizado.");
       } else if (action === "attachment") await showAttachment(id);
       else if (action === "pdf" || action === "excel") {
@@ -429,6 +437,7 @@ export function createFinanceModule({ root, db, notify }) {
         target.disabled = true;
         const report = prepareReport(allowedEvents(), records, filters);
         await (action === "pdf" ? downloadPdf(report) : downloadExcel(report));
+        await tryActivity(db, user, { action: "finance.export", eventId: selectedId, eventName: selected()?.name || "Resumen general", summary: `Reporte financiero descargado en ${action === "pdf" ? "PDF" : "Excel"}`, after: { format: action, filters, eventIds: allowedEvents().map((e) => e.id), operations: report.operations.length } });
         notify("Reporte generado con los filtros seleccionados.");
       }
     } catch (error) { console.error(error); notify(error.message, true); }

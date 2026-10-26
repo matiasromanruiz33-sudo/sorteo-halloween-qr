@@ -5,11 +5,29 @@ import { initializeTestEnvironment, assertFails, assertSucceeds } from "@firebas
 import { collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, serverTimestamp, writeBatch, query, where } from "firebase/firestore";
 import { saveFinanceEvent, recordOperation, closeCash, appendFinanceLink, syncFinanceLink } from "../src/finance-store.js";
 import { OWNER_UID, OPERATOR_UID, summarize, inventoryAt } from "../src/finance-core.js";
+import { auditedEventBatch, appendEventAudit, auditData, auditSafe, recordActivity } from "../src/audit-store.js";
+import { normalizeAudit, filterAudit } from "../src/audit-core.js";
 
 let env, ownerDb, operatorDb;
 const owner = { uid: OWNER_UID, email: "matiasromanruiz33@gmail.com" };
 const operator = { uid: OPERATOR_UID, email: "vmc.ecuador@gmail.com" };
 const date = "2026-10-15";
+async function seedEvent(id, data) {
+  const batch = auditedEventBatch(ownerDb, owner, { eventId: id, eventName: data.name, action: "event.create" });
+  batch.set(doc(ownerDb, "events", id), data); await batch.commit();
+}
+async function setProfile(active) {
+  const batch = writeBatch(ownerDb), ref = doc(collection(ownerDb, "userAudit"));
+  batch.set(ref, { actorUid: OWNER_UID, actorEmail: owner.email, subjectUid: OPERATOR_UID, action: "Permiso de prueba", createdAt: serverTimestamp() });
+  batch.set(doc(ownerDb, "users", OPERATOR_UID), { email: operator.email, role: "operator", active, auditId: ref.id, updatedAt: serverTimestamp() });
+  await batch.commit();
+}
+async function configure(id, changes) {
+  const batch = writeBatch(ownerDb), ref = doc(collection(ownerDb, "financeEvents", id, "audit"));
+  batch.set(ref, { actorUid: OWNER_UID, actorEmail: owner.email, action: "Configuración de prueba", createdAt: serverTimestamp() });
+  batch.update(doc(ownerDb, "financeEvents", id), { ...changes, configAuditId: ref.id, updatedAt: serverTimestamp() });
+  await batch.commit();
+}
 const eventId = "isolated-financial-test";
 const root = (...parts) => ["financeEvents", eventId, ...parts];
 const record = async (input, id = crypto.randomUUID()) => {
@@ -21,8 +39,8 @@ before(async () => {
   env = await initializeTestEnvironment({ projectId: "demo-mirage-finance", firestore: { host: "127.0.0.1", port: 8085, rules: await readFile("firestore.rules", "utf8") } });
   ownerDb = env.authenticatedContext(OWNER_UID, { email: owner.email }).firestore();
   operatorDb = env.authenticatedContext(OPERATOR_UID, { email: operator.email, email_verified: true }).firestore();
-  await setDoc(doc(ownerDb, "users", OPERATOR_UID), { email: operator.email, role: "operator", active: true, updatedAt: serverTimestamp() });
-  await setDoc(doc(ownerDb, "events", eventId), { name: "Evento de prueba" });
+  await setProfile(true);
+  await seedEvent(eventId, { name: "Evento de prueba" });
   await saveFinanceEvent(ownerDb, owner, { id: eventId, name: "Evento de prueba" }, { assigned: true, budget: 500, allowDiscounts: true, allowRefunds: true });
 });
 after(async () => { await env?.cleanup(); });
@@ -110,16 +128,20 @@ test("complete financial flow, weighted cost, idempotency, concurrency and permi
   assert.equal(edited.inventoryValueCents, 6146);
 
   // Existing ticket validation remains unchanged for the scanner profile.
-  await setDoc(doc(ownerDb, "events", eventId, "tickets", "qr-test"), { status: "active", code: "UNCHANGED", holderName: "Temporal" });
-  await assertSucceeds(updateDoc(doc(scannerDb, "events", eventId, "tickets", "qr-test"), { status: "used", usedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  const ticketBatch = auditedEventBatch(ownerDb, owner, { eventId, action: "ticket.create" });
+  ticketBatch.set(doc(ownerDb, "events", eventId, "tickets", "qr-test"), { status: "active", code: "UNCHANGED", holderName: "Temporal" });
+  await ticketBatch.commit();
+  const scanBatch = writeBatch(scannerDb);
+  appendEventAudit(scanBatch, scannerDb, { uid: "9GPk0CuI60fz8oQ7FAtPvcX49VI3", email: "anderson.2008.cobos@gmail.com" }, doc(scannerDb, "events", eventId, "tickets", "qr-test"), "update", { status: "used", usedAt: serverTimestamp(), updatedAt: serverTimestamp() }, { action: "qr.redeem" });
+  await assertSucceeds(scanBatch.commit());
   await assertFails(updateDoc(doc(scannerDb, "events", eventId, "tickets", "qr-test"), { status: "active", updatedAt: serverTimestamp() }));
 
   const event2 = "not-assigned";
   await saveFinanceEvent(ownerDb, owner, { id: event2, name: "Privado" }, { assigned: false, budget: 20 });
   await assertFails(getDoc(doc(operatorDb, "financeEvents", event2)));
-  await updateDoc(doc(ownerDb, ...root()), { allowDiscounts: false, allowRefunds: false, updatedAt: serverTimestamp() });
+  await configure(eventId, { allowDiscounts: false, allowRefunds: false });
   await assert.rejects(() => record({ kind: "sale", productId: "water", quantity: 1, discount: 1 }), /autorizado descuentos/);
-  await updateDoc(doc(ownerDb, "users", OPERATOR_UID), { active: false, updatedAt: serverTimestamp() });
+  await setProfile(false);
   await assertFails(getDoc(doc(operatorDb, ...root("products", "water"))));
 });
 
@@ -137,11 +159,12 @@ test("automatic links preserve source data, existing finances and explicit revoc
   const sourceRef = doc(ownerDb, "events", id);
   const financeRef = doc(ownerDb, "financeEvents", id);
   const source = { name: "Evento anterior", eventDate: date, participantCount: 21, status: "drawn" };
-  await setDoc(sourceRef, source);
+  await seedEvent(id, source);
+  const seeded = (await getDoc(sourceRef)).data();
   await syncFinanceLink(ownerDb, owner, id);
-  assert.deepEqual((await getDoc(sourceRef)).data(), source);
+  assert.deepEqual((await getDoc(sourceRef)).data(), seeded);
   assert.deepEqual((await getDoc(financeRef)).data().assignedUids, [OPERATOR_UID]);
-  await updateDoc(financeRef, { budgetCents: 12345, assignedUids: [], updatedAt: serverTimestamp() });
+  await configure(id, { budgetCents: 12345, assignedUids: [] });
   const auditBefore = (await getDocs(collection(financeRef, "audit"))).size;
   await syncFinanceLink(ownerDb, owner, id);
   assert.equal((await getDocs(collection(financeRef, "audit"))).size, auditBefore);
@@ -154,11 +177,61 @@ test("automatic links preserve source data, existing finances and explicit revoc
   assert.deepEqual(updated.assignedUids, []);
   assert.equal((await getDoc(sourceRef)).data().participantCount, 21);
 
-  const batch = writeBatch(ownerDb);
+  const batch = auditedEventBatch(ownerDb, owner, { action: "event.create" });
   const newSource = { id: "atomic-new-event", name: "Nuevo evento", eventDate: date };
   batch.set(doc(ownerDb, "events", newSource.id), { name: newSource.name, eventDate: date });
   appendFinanceLink(batch, ownerDb, owner, newSource);
   await batch.commit();
   assert.deepEqual((await getDoc(doc(ownerDb, "financeEvents", newSource.id))).data().assignedUids, [OPERATOR_UID]);
   await assert.rejects(() => syncFinanceLink(operatorDb, operator, id), /Solo el organizador/);
+});
+
+test("event mutations require append-only audit, bulk writes remain atomic and secrets are redacted", async () => {
+  const id = "audit-bulk-test";
+  await assertFails(setDoc(doc(ownerDb, "events", id), { name: "Sin auditoría" }));
+  const batch = auditedEventBatch(ownerDb, owner, { eventId: id, action: "event.create", eventName: "Evento de auditoría" });
+  batch.set(doc(ownerDb, "events", id), { name: "Evento de auditoría" });
+  for (let index = 0; index < 200; index++) batch.set(doc(ownerDb, "events", id, "participants", `person-${index}`), { name: `Persona ${index}`, winner: false });
+  batch.set(doc(ownerDb, "events", id, "tickets", "original"), { holderName: "Prueba", code: "SECRET-QR-CODE", status: "active" });
+  await assertSucceeds(batch.commit());
+  const source = (await getDoc(doc(ownerDb, "events", id))).data();
+  const logRef = doc(ownerDb, "systemAudit", source.auditId);
+  const log = (await getDoc(logRef)).data();
+  assert.equal(log.actorUid, OWNER_UID); assert.equal(log.eventId, id);
+  assert.equal(JSON.parse(log.afterJson).length, 202);
+  assert.equal(JSON.parse(log.afterJson)[1].fields.name, "Persona 0");
+  assert.ok(!JSON.stringify(log).includes("SECRET-QR-CODE"));
+  await assertFails(updateDoc(logRef, { summary: "Alterado" }));
+  await assertFails(deleteDoc(logRef));
+  await assertFails(updateDoc(doc(ownerDb, "events", id), { name: "Cambio sin log nuevo" }));
+  const forbidden = { uid: OPERATOR_UID, email: operator.email };
+  await assertFails(recordActivity(operatorDb, forbidden, { action: "permissions.change", summary: "Impersonación" }));
+  await assertFails(getDocs(collection(operatorDb, "systemAudit")));
+  await assertFails(updateDoc(doc(ownerDb, "users", OPERATOR_UID), { active: true, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(ownerDb, "financeEvents", eventId), { budgetCents: 1, updatedAt: serverTimestamp() }));
+  const scanner = { uid: "9GPk0CuI60fz8oQ7FAtPvcX49VI3", email: "anderson.2008.cobos@gmail.com" };
+  const scannerDb = env.authenticatedContext(scanner.uid, { email: scanner.email }).firestore();
+  await assertSucceeds(recordActivity(scannerDb, scanner, { action: "qr.reject", outcome: "rejected", summary: "Código inválido" }));
+  await assertFails(getDocs(collection(scannerDb, "systemAudit")));
+  const fakeLog = auditData(scanner, { action: "qr.reject", outcome: "rejected" });
+  await assertFails(setDoc(doc(scannerDb, "systemAudit", "spoofed"), { ...fakeLog, actorUid: OWNER_UID }));
+  await assertFails(setDoc(doc(env.unauthenticatedContext().firestore(), "systemAudit", "anonymous"), fakeLog));
+  await assertFails(deleteDoc(doc(ownerDb, "events", id, "participants", "person-0")));
+  const deletion = auditedEventBatch(ownerDb, owner, { eventId: id, action: "participant.delete" });
+  deletion.delete(doc(ownerDb, "events", id, "participants", "person-0"));
+  deletion.update(doc(ownerDb, "events", id), { updatedAt: serverTimestamp() });
+  await assertSucceeds(deletion.commit());
+  const final = auditedEventBatch(ownerDb, owner, { eventId: id, action: "event.delete", deleteEvent: true });
+  final.delete(doc(ownerDb, "events", id)); await assertSucceeds(final.commit());
+  assert.ok((await getDoc(logRef)).exists());
+  assert.ok((await getDoc(doc(ownerDb, "systemAudit", `delete_events_${id}`))).exists());
+});
+
+test("audit filters respect Ecuador date boundary and redact historical sensitive fields", () => {
+  const row = normalizeAudit("configuration", "config-1", { createdAt: "2026-10-16T02:00:00Z", actorUid: OWNER_UID, action: "Configuración", before: '{"flyer":"data:image/png;base64,SECRET","budgetCents":100}', after: '{"budgetCents":200,"password":"SECRET"}' }, { id: "e", name: "Evento" });
+  assert.equal(filterAudit([row], { from: "2026-10-15", to: "2026-10-15", event: "e", actor: OWNER_UID, module: "configuration", search: "config" }).length, 1);
+  assert.equal(filterAudit([row], { from: "2026-10-16" }).length, 0);
+  assert.ok(!JSON.stringify(row.before).includes("SECRET"));
+  assert.ok(!JSON.stringify(row.after).includes("SECRET"));
+  assert.deepEqual(auditSafe({ code: "SECRET", payload: "SN2:secret", token: "SECRET", holderName: "Nombre" }), { holderName: "Nombre" });
 });

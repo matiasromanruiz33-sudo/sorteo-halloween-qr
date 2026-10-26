@@ -1,0 +1,12 @@
+.audit-heading { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin-bottom: 30px; }
+.audit-heading h1 { font: 500 clamp(42px, 6vw, 76px) "Oswald", sans-serif; text-transform: uppercase; margin: 0; }
+.audit-heading p:last-child { color: var(--muted); font-size: 13px; line-height: 1.8; }
+#audit-view select { width: 100%; min-height: 50px; padding: 10px; background: #111; color: var(--paper); border: 1px solid #333; font: 13px "DM Sans", sans-serif; }
+.audit-table td { max-width: 300px; overflow-wrap: anywhere; }
+.audit-table details { min-width: 130px; max-width: 300px; }
+.audit-table summary { color: var(--success); cursor: pointer; }
+.audit-table pre { white-space: pre-wrap; max-height: 360px; overflow: auto; font: 10px/1.7 monospace; }
+.audit-table .audit-success { color: var(--success); }
+.audit-table .audit-error, .audit-table .audit-rejected { color: var(--danger); }
+.audit-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 25px 0; font-size: 12px; }
+@media(max-width: 650px) { .audit-heading { flex-direction: column; align-items: start; } .audit-pagination { flex-wrap: wrap; } }

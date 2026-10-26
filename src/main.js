@@ -28,13 +28,12 @@ import {
   onSnapshot,
   runTransaction,
   serverTimestamp,
-  updateDoc,
-  writeBatch,
   connectFirestoreEmulator,
 } from "firebase/firestore";
 import { firebaseConfig } from "./firebase-config.js";
 import { OPERATOR_UID } from "./finance-core.js";
 import { appendFinanceLink, syncFinanceLink } from "./finance-store.js";
+import { auditedEventBatch, appendEventAudit, tryActivity } from "./audit-store.js";
 
 const ADMIN_UID = "FGmxXhvrahb1KGV9NCy6oikmSfH3";
 const SCANNER_UID = "9GPk0CuI60fz8oQ7FAtPvcX49VI3";
@@ -50,6 +49,7 @@ if (useEmulators) {
 let qrModulePromise;
 let scannerModulePromise;
 let financeModule;
+let auditModule;
 let authVersion = 0;
 
 const loadQrCode = () => (qrModulePromise ||= import("qrcode").then((module) => module.default));
@@ -119,6 +119,7 @@ document.querySelector("#app").innerHTML = `
         <button class="nav-button active" type="button" data-view="events">Eventos</button>
         <button class="nav-button" type="button" data-view="scanner">Escáner</button>
         <button class="nav-button" type="button" data-view="finance" hidden>Gestión</button>
+        <button class="nav-button" type="button" data-view="audit" hidden>Auditoría</button>
       </nav>
       <button class="session-button" id="logout-button" type="button"><span class="online-dot"></span> Cerrar sesión</button>
     </header>
@@ -207,6 +208,7 @@ document.querySelector("#app").innerHTML = `
       </section>
 
       <section class="main-view" id="finance-view"></section>
+      <section class="main-view" id="audit-view"></section>
 
       <section class="main-view" id="scanner-view">
         <div class="scanner-heading">
@@ -388,11 +390,35 @@ function safeFilename(value) {
 
 let toastTimer;
 function showToast(message, error = false) {
+  if (error && state.user) void activity("system.error", { outcome: "error", summary: message });
   clearTimeout(toastTimer);
   elements.toast.textContent = message;
   elements.toast.classList.toggle("error", error);
   elements.toast.classList.add("show");
   toastTimer = setTimeout(() => elements.toast.classList.remove("show"), 3500);
+}
+
+function activity(action, input = {}) {
+  return tryActivity(db, auth.currentUser, { eventId: state.event?.id || "", eventName: state.event?.name || "", action, ...input });
+}
+
+window.addEventListener("error", (event) => {
+  if (state.user) void activity("system.error", { outcome: "error", summary: "Error de ejecución en la aplicación", after: { errorCode: event.error?.name || "RuntimeError" } });
+});
+window.addEventListener("unhandledrejection", (event) => {
+  if (state.user) void activity("system.error", { outcome: "error", summary: "Operación de la aplicación no resuelta", after: { errorCode: event.reason?.code || event.reason?.name || "UnhandledRejection" } });
+});
+
+function eventBatch(action, options = {}) {
+  return auditedEventBatch(db, state.user, {
+    action, eventId: state.event?.id || "", eventName: state.event?.name || "", ...options,
+  });
+}
+
+async function updateEventDocument(ref, data, action) {
+  const batch = eventBatch(action);
+  batch.update(ref, data);
+  await batch.commit();
 }
 
 function setBusy(button, busy, label) {
@@ -464,6 +490,7 @@ function renderEvents() {
 function openEvent(eventOrId) {
   const event = typeof eventOrId === "string" ? state.events.find((item) => item.id === eventOrId) : eventOrId;
   if (!event) return;
+  void activity("event.open", { eventId: event.id, eventName: event.name, summary: "Consulta del evento y sus participantes / QR" });
   closeEventSubscriptions();
   state.event = event;
   state.participants = [];
@@ -727,7 +754,7 @@ async function saveEvent(event) {
       showToast("Evento actualizado.");
     } else {
       const eventRef = doc(collection(db, "events"));
-      const batch = writeBatch(db);
+      const batch = eventBatch("event.create", { eventId: eventRef.id, eventName: name, summary: `Evento creado con ${names.length} participantes` });
       batch.set(eventRef, {
         name,
         eventDate,
@@ -787,7 +814,7 @@ async function saveParticipant(event) {
   if (!name) return;
   try {
     if (participantId) {
-      await updateDoc(doc(db, "events", state.event.id, "participants", participantId), { name, updatedAt: serverTimestamp() });
+      await updateEventDocument(doc(db, "events", state.event.id, "participants", participantId), { name, updatedAt: serverTimestamp() }, "participant.update");
       showToast("Participante actualizado.");
     } else {
       if (state.participants.length >= 200) {
@@ -795,7 +822,7 @@ async function saveParticipant(event) {
         return;
       }
       const participantRef = doc(collection(db, "events", state.event.id, "participants"));
-      const batch = writeBatch(db);
+      const batch = eventBatch("participant.create");
       batch.set(participantRef, { name, winner: false, ticketId: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
       batch.update(doc(db, "events", state.event.id), { participantCount: increment(1), updatedAt: serverTimestamp() });
       await batch.commit();
@@ -817,7 +844,7 @@ async function deleteParticipant(participantId) {
     return;
   }
   try {
-    const batch = writeBatch(db);
+    const batch = eventBatch("participant.delete");
     batch.delete(doc(db, "events", state.event.id, "participants", participantId));
     batch.update(doc(db, "events", state.event.id), { participantCount: increment(-1), updatedAt: serverTimestamp() });
     await batch.commit();
@@ -849,7 +876,7 @@ async function runDraw() {
   if (!confirm(`¿Sortear ${winnerCount} ganadores? El resultado quedará registrado.`)) return;
   try {
     const winners = secureShuffle(state.participants).slice(0, winnerCount);
-    const batch = writeBatch(db);
+    const batch = eventBatch("draw.run", { summary: `Sorteo de ${winnerCount} ganadores y generación de QR` });
     winners.forEach((person) => {
       const ticketRef = doc(collection(db, "events", state.event.id, "tickets"));
       batch.set(ticketRef, {
@@ -883,7 +910,7 @@ async function resetDraw() {
   if (!state.event || state.event.status !== "drawn") return;
   if (!confirm("¿Reiniciar el sorteo? Se eliminarán los QR gratuitos actuales. Las entradas vendidas no cambian.")) return;
   try {
-    const batch = writeBatch(db);
+    const batch = eventBatch("draw.reset", { summary: "Reinicio del sorteo y eliminación de sus QR gratuitos" });
     state.participants
       .filter((person) => person.winner)
       .forEach((person) => {
@@ -917,7 +944,7 @@ async function createSale(event) {
   setBusy(button, true, "Generando...");
   try {
     const ticketRef = doc(collection(db, "events", state.event.id, "tickets"));
-    const batch = writeBatch(db);
+    const batch = eventBatch("ticket.create", { summary: `Entrada vendida registrada: ${name}` });
     batch.set(ticketRef, {
       type: "paid",
       holderName: name,
@@ -958,7 +985,7 @@ async function saveTicketEdit(event) {
   const holderName = document.querySelector("#ticket-edit-name").value.trim().replace(/\s+/g, " ");
   const reference = document.querySelector("#ticket-edit-reference").value.trim();
   try {
-    await updateDoc(doc(db, "events", state.event.id, "tickets", ticketId), { holderName, reference, updatedAt: serverTimestamp() });
+    await updateEventDocument(doc(db, "events", state.event.id, "tickets", ticketId), { holderName, reference, updatedAt: serverTimestamp() }, "ticket.update");
     document.querySelector("#ticket-edit-dialog").close();
     showToast("Entrada actualizada.");
   } catch (error) {
@@ -972,7 +999,7 @@ async function deleteTicket(ticketId) {
   const ticket = state.tickets.find((item) => item.id === ticketId && item.type === "paid");
   if (!ticket || !confirm(`¿Eliminar definitivamente la entrada de ${ticket.holderName}?`)) return;
   try {
-    const batch = writeBatch(db);
+    const batch = eventBatch("ticket.delete");
     batch.delete(doc(db, "events", state.event.id, "tickets", ticket.id));
     batch.update(doc(db, "events", state.event.id), { updatedAt: serverTimestamp() });
     await batch.commit();
@@ -989,11 +1016,11 @@ async function toggleTicket(ticketId) {
   if (!ticket) return;
   const nextStatus = ticket.status === "revoked" ? "active" : "revoked";
   try {
-    await updateDoc(doc(db, "events", state.event.id, "tickets", ticket.id), {
+    await updateEventDocument(doc(db, "events", state.event.id, "tickets", ticket.id), {
       status: nextStatus,
       usedAt: nextStatus === "active" ? null : ticket.usedAt || null,
       updatedAt: serverTimestamp(),
-    });
+    }, nextStatus === "active" ? "ticket.reactivate" : "ticket.revoke");
     showToast(nextStatus === "active" ? "Entrada reactivada." : "Entrada revocada.");
   } catch (error) {
     console.error(error);
@@ -1006,12 +1033,12 @@ async function regenerateTicket(ticketId) {
   const ticket = state.tickets.find((item) => item.id === ticketId);
   if (!ticket || !confirm(`¿Invalidar el QR anterior de ${ticket.holderName} y generar uno nuevo?`)) return;
   try {
-    await updateDoc(doc(db, "events", state.event.id, "tickets", ticket.id), {
+    await updateEventDocument(doc(db, "events", state.event.id, "tickets", ticket.id), {
       code: createTicketCode(),
       status: "active",
       usedAt: null,
       updatedAt: serverTimestamp(),
-    });
+    }, "ticket.regenerate");
     showToast("QR regenerado. El código anterior ya no funciona.");
     setTimeout(() => showQr(ticket.id), 350);
   } catch (error) {
@@ -1038,6 +1065,7 @@ async function showQr(ticketId) {
   elements.qrDialog.dataset.ticketId = ticket.id;
   elements.qrDialog.dataset.payload = payload;
   elements.qrDialog.showModal();
+  void activity("qr.view", { targetPath: `events/${state.event.id}/tickets/${ticket.id}`, summary: `Consulta de QR: ${ticket.holderName}` });
 }
 
 async function downloadQr() {
@@ -1055,6 +1083,7 @@ async function downloadQr() {
   link.download = `${safeFilename(state.event.name)}-${safeFilename(ticket.holderName)}.png`;
   link.href = canvas.toDataURL("image/png");
   link.click();
+  void activity("qr.download", { targetPath: `events/${state.event.id}/tickets/${ticket.id}`, summary: `Descarga de QR: ${ticket.holderName}` });
 }
 
 async function deleteEvent() {
@@ -1065,11 +1094,12 @@ async function deleteEvent() {
     const ticketSnapshot = await getDocs(collection(db, "events", eventId, "tickets"));
     const references = [...participantSnapshot.docs, ...ticketSnapshot.docs].map((item) => item.ref);
     for (let index = 0; index < references.length; index += 400) {
-      const batch = writeBatch(db);
+      const batch = eventBatch("event.delete.chunk", { summary: `Eliminación de documentos del evento, lote ${index / 400 + 1}` });
       references.slice(index, index + 400).forEach((reference) => batch.delete(reference));
+      batch.update(doc(db, "events", eventId), { updatedAt: serverTimestamp() });
       await batch.commit();
     }
-    const finalBatch = writeBatch(db);
+    const finalBatch = eventBatch("event.delete", { eventId, deleteEvent: true, summary: "Eliminación del evento original; el historial de auditoría se conserva" });
     finalBatch.delete(doc(db, "events", eventId));
     await finalBatch.commit();
     backToEvents();
@@ -1100,6 +1130,7 @@ async function startScanner() {
     );
     elements.scannerPlaceholder.hidden = true;
     elements.cameraButton.querySelector("span").textContent = "Detener cámara";
+    void activity("camera.start", { eventId: "", eventName: "", summary: "Cámara de validación iniciada" });
   } catch (error) {
     console.error(error);
     showToast("No fue posible abrir la cámara. Revisa el permiso del navegador.", true);
@@ -1113,6 +1144,7 @@ async function stopScanner() {
   await state.scanner.stop();
   elements.scannerPlaceholder.hidden = false;
   elements.cameraButton.querySelector("span").textContent = "Activar cámara";
+  void activity("camera.stop", { eventId: "", eventName: "", summary: "Cámara de validación detenida" });
 }
 
 function parseTicket(rawValue) {
@@ -1127,6 +1159,7 @@ async function handleScan(rawValue) {
   if (state.scanner?.isScanning) state.scanner.pause(true);
   const parsed = parseTicket(rawValue);
   if (!parsed) {
+    void activity("qr.reject", { eventId: "", eventName: "", outcome: "rejected", summary: "QR con formato desconocido; contenido no almacenado" });
     showResult("invalid", "Código desconocido", "Este QR no fue generado por el sistema.");
     return;
   }
@@ -1134,6 +1167,7 @@ async function handleScan(rawValue) {
 }
 
 async function redeemTicket({ eventId, ticketId, code }) {
+  const auditId = crypto.randomUUID();
   try {
     const result = await runTransaction(db, async (transaction) => {
       const eventRef = doc(db, "events", eventId);
@@ -1145,10 +1179,13 @@ async function redeemTicket({ eventId, ticketId, code }) {
       if (ticket.status === "used") return { status: "used", ticket, eventName: eventSnapshot.data().name };
       if (ticket.status === "revoked") return { status: "revoked", ticket, eventName: eventSnapshot.data().name };
       if (ticket.status !== "active") return { status: "invalid" };
-      transaction.update(ticketRef, { status: "used", usedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      appendEventAudit(transaction, db, state.user, ticketRef, "update", { status: "used", usedAt: serverTimestamp(), updatedAt: serverTimestamp() }, {
+        action: "qr.redeem", eventName: eventSnapshot.data().name, before: { status: ticket.status, holderName: ticket.holderName }, summary: `Ingreso autorizado: ${ticket.holderName}`,
+      }, auditId);
       return { status: "valid", ticket, eventName: eventSnapshot.data().name };
     });
 
+    if (result.status !== "valid") void activity("qr.reject", { eventId, eventName: result.eventName || "", targetPath: `events/${eventId}/tickets/${ticketId}`, outcome: "rejected", summary: { used: "Entrada ya utilizada", revoked: "Entrada revocada", invalid: "QR inválido o no coincidente" }[result.status] });
     if (result.status === "valid") {
       showResult("valid", "Ingreso autorizado", `${result.ticket.holderName} · ${result.eventName}`);
       navigator.vibrate?.([100, 50, 100]);
@@ -1218,6 +1255,7 @@ async function handleLogin(event) {
 
 async function handleLogout() {
   await stopScanner();
+  await activity("session.logout", { eventId: "", eventName: "", summary: "Cierre de sesión solicitado" });
   await signOut(auth);
 }
 
@@ -1263,6 +1301,7 @@ document.querySelector("#manual-code-form").addEventListener("submit", (event) =
 document.querySelector("#download-qr-button").addEventListener("click", downloadQr);
 document.querySelector("#copy-code-button").addEventListener("click", async () => {
   await navigator.clipboard.writeText(elements.qrDialog.dataset.payload);
+  void activity("qr.copy", { summary: "Código de entrada copiado; contenido protegido" });
   showToast("Código copiado.");
 });
 document.querySelector("#result-close").addEventListener("click", closeResult);
@@ -1292,6 +1331,7 @@ setPersistence(auth, browserLocalPersistence).catch(console.error);
 onAuthStateChanged(auth, async (user) => {
   const version = ++authVersion;
   financeModule?.stop();
+  auditModule?.stop();
   state.eventUnsubscribe?.();
   state.eventUnsubscribe = null;
   closeEventSubscriptions();
@@ -1316,6 +1356,7 @@ onAuthStateChanged(auth, async (user) => {
   }
 
   if (role === "operator" && !user.emailVerified) {
+    void tryActivity(db, user, { action: "session.verification_required", summary: "Acceso operativo pendiente de verificación de correo", outcome: "rejected" });
     elements.appShell.hidden = true;
     elements.loginScreen.hidden = false;
     elements.loginForm.hidden = true;
@@ -1347,25 +1388,37 @@ onAuthStateChanged(auth, async (user) => {
   document.querySelector('[data-view="events"]').hidden = role !== "admin";
   document.querySelector('[data-view="scanner"]').hidden = role === "operator";
   document.querySelector('[data-view="finance"]').hidden = role === "scanner";
+  document.querySelector('[data-view="audit"]').hidden = role !== "admin";
   document.querySelector(".nav-home").setAttribute("aria-label", role === "admin" ? "Ir a eventos" : role === "operator" ? "Ir a gestión" : "Ir al escáner");
 
-  if (role !== "scanner") {
-    const { createFinanceModule } = await import("./finance.js");
-    if (version !== authVersion) return;
-    financeModule ||= createFinanceModule({ root: document.querySelector("#finance-view"), db, notify: showToast });
-    financeModule.start(user, role);
-  }
-
+  // The original event screen is available independently of the extra modules.
   if (role === "admin") {
     backToEvents();
     switchMainView("events");
     subscribeEvents();
-  } else {
-    switchMainView(role === "operator" ? "finance" : "scanner");
+  } else switchMainView(role === "operator" ? "finance" : "scanner");
+  void tryActivity(db, user, { action: "session.open", summary: "Sesión autenticada iniciada o restaurada" });
+
+  if (role !== "scanner") {
+    try {
+    const { createFinanceModule } = await import("./finance.js");
+    if (version !== authVersion) return;
+    financeModule ||= createFinanceModule({ root: document.querySelector("#finance-view"), db, notify: showToast });
+    financeModule.start(user, role);
+    } catch (error) { console.error(error); showToast("No se pudo cargar Gestión. Tus eventos y QR continúan disponibles.", true); }
+  }
+
+  if (role === "admin") {
+    try {
+      const { createAuditModule } = await import("./audit.js");
+      if (version !== authVersion) return;
+      auditModule ||= createAuditModule({ root: document.querySelector("#audit-view"), db, notify: showToast });
+      auditModule.start(user);
+    } catch (error) { console.error(error); showToast("No se pudo cargar Auditoría. Intenta actualizar la página.", true); }
   }
 });
 
-document.querySelector("#verification-logout").addEventListener("click", () => signOut(auth));
+document.querySelector("#verification-logout").addEventListener("click", handleLogout);
 document.querySelector("#verification-refresh").addEventListener("click", async () => {
   const message = document.querySelector("#verification-message");
   try {
@@ -1381,6 +1434,7 @@ document.querySelector("#verification-send").addEventListener("click", async (ev
   button.disabled = true;
   try {
     await sendEmailVerification(auth.currentUser);
+    void activity("session.verification_sent", { eventId: "", eventName: "", summary: "Enlace de verificación reenviado" });
     document.querySelector("#verification-message").textContent = "Enlace enviado. Revisa tu bandeja de entrada y correo no deseado.";
   } catch { document.querySelector("#verification-message").textContent = "No se pudo reenviar. Espera unos minutos e inténtalo nuevamente."; }
   finally { button.disabled = false; }

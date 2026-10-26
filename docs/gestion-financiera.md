@@ -64,3 +64,5 @@ Las reglas verifican el UID organizador, UID operativo, correo verificado, perfi
 Una operación y sus efectos en producto, saldo por método y deuda se confirman atómicamente mediante transacción. Firestore verifica deltas y costos; no basta con manipular el JavaScript o enviar otra solicitud. Cada formulario tiene un identificador idempotente; reintentar no duplica operaciones. Los historiales financieros no admiten sobrescritura ni borrado desde clientes, ni siquiera por el organizador.
 
 Las pruebas en emuladores comprueban concurrencia, sobreventa, reintentos, devoluciones, costo ponderado, pagos parciales, cierres, permisos, correo sin verificar, aislamiento del escáner, reportes y diseño móvil.
+
+El organizador puede consultar conjuntamente estos movimientos y los de eventos/QR en la pestaña principal **Auditoría**, con exportación PDF/XLSX: [guía de logs y auditoría](auditoria.md).

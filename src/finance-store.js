@@ -1,5 +1,6 @@
 import { collection, doc, runTransaction, serverTimestamp } from "firebase/firestore";
 import { cashEffect, cents, units, OWNER_UID, OPERATOR_UID, DEFAULT_CATEGORIES } from "./finance-core.js";
+import { appendEventAudit } from "./audit-store.js";
 
 export const financeRef = (db, eventId, ...path) => doc(db, "financeEvents", eventId, ...path);
 
@@ -17,8 +18,9 @@ function initialFinanceEvent(source) {
 export function appendFinanceLink(batch, db, user, source) {
   if (user.uid !== OWNER_UID) throw new Error("Solo el organizador puede vincular eventos.");
   const ref = financeRef(db, source.id);
-  batch.set(ref, initialFinanceEvent(source));
-  batch.set(doc(collection(ref, "audit")), {
+  const auditRef = doc(collection(ref, "audit"));
+  batch.set(ref, { ...initialFinanceEvent(source), configAuditId: auditRef.id });
+  batch.set(auditRef, {
     actorUid: user.uid, actorEmail: user.email, createdAt: serverTimestamp(),
     action: "Evento creado por el organizador y vinculado automáticamente a VMC",
     before: "{}", after: JSON.stringify({ sourceEventId: source.id, assignedUids: [OPERATOR_UID] }),
@@ -32,19 +34,22 @@ export async function syncFinanceLink(db, user, eventId, { eventUpdate, assignEx
   const sourceRef = doc(db, "events", eventId);
   const ref = financeRef(db, eventId);
   const auditRef = doc(collection(ref, "audit"));
+  const eventAuditId = doc(collection(db, "systemAudit")).id;
   await runTransaction(db, async (tx) => {
     const [sourceSnapshot, snapshot] = await Promise.all([tx.get(sourceRef), tx.get(ref)]);
     if (!sourceSnapshot.exists()) return;
     const source = { id: eventId, ...sourceSnapshot.data(), ...eventUpdate };
     const previous = snapshot.data();
-    if (eventUpdate) tx.update(sourceRef, { ...eventUpdate, updatedAt: serverTimestamp() });
-    if (!previous) tx.set(ref, initialFinanceEvent(source));
+    if (eventUpdate) appendEventAudit(tx, db, user, sourceRef, "update", { ...eventUpdate, updatedAt: serverTimestamp() }, {
+      action: "event.update", eventName: source.name, before: sourceSnapshot.data(), summary: "Datos del evento actualizados por el organizador",
+    }, eventAuditId);
+    if (!previous) tx.set(ref, { ...initialFinanceEvent(source), configAuditId: auditRef.id });
     else {
       const changes = {};
       if (eventUpdate) Object.assign(changes, { name: source.name, eventDate: source.eventDate || "" });
       if (assignExisting && !previous.assignedUids.includes(OPERATOR_UID)) changes.assignedUids = [...previous.assignedUids, OPERATOR_UID];
       if (!Object.keys(changes).length) return;
-      tx.update(ref, { ...changes, updatedAt: serverTimestamp() });
+      tx.update(ref, { ...changes, configAuditId: auditRef.id, updatedAt: serverTimestamp() });
     }
     tx.set(auditRef, { actorUid: user.uid, actorEmail: user.email, createdAt: serverTimestamp(),
       action: previous ? eventUpdate ? "Datos del evento sincronizados por el organizador" : "Evento vinculado a VMC por el organizador" : "Evento existente vinculado automáticamente a VMC",
@@ -66,6 +71,7 @@ export async function saveFinanceEvent(db, user, source, input) {
       budgetCents: cents(input.budget || 0), categories: input.categories || previous.categories || DEFAULT_CATEGORIES,
       assignedUids: input.assigned ? [OPERATOR_UID] : [], allowDiscounts: Boolean(input.allowDiscounts), allowRefunds: Boolean(input.allowRefunds),
       createdAt: previous.createdAt || serverTimestamp(), updatedAt: serverTimestamp(),
+      configAuditId: auditRef.id,
     };
     tx.set(ref, data);
     tx.set(auditRef, { actorUid: user.uid, actorEmail: user.email, createdAt: serverTimestamp(), action: snapshot.exists() ? "Configuración y permisos actualizados" : "Gestión financiera habilitada", before: JSON.stringify(previous), after: JSON.stringify(input) });

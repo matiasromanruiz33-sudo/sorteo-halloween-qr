@@ -13,6 +13,7 @@ Panel privado y responsive para gestionar fiestas, realizar sorteos de entradas 
 - Módulo integrado **Gestión**: inventario, compras, ventas, inversiones, gastos, pagos y caja por evento.
 - Perfil operativo verificado con asignaciones y permisos financieros controlados desde Firestore.
 - Auditoría inmutable, estadísticas y exportaciones PDF/XLSX. Ver [guía financiera](docs/gestion-financiera.md).
+- Auditoría central del sistema para el organizador: logs de eventos, participantes, sorteos, QR, sesiones, permisos y movimientos financieros, con filtros y descargas PDF/Excel. Ver [guía de auditoría](docs/auditoria.md).
 
 ## Desarrollo
 
