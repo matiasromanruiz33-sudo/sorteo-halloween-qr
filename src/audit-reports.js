@@ -1,7 +1,6 @@
 import { ecuadorTime, money } from "./finance-core.js";
-import { AUDIT_MODULES, OUTCOMES, ROLES } from "./audit-core.js";
+import { AUDIT_MODULES, OUTCOMES, ROLES, auditDetailSections } from "./audit-core.js";
 
-const detailText = (value) => value == null ? "—" : JSON.stringify(value, null, 2);
 const formatDate = (row) => row.createdAt ? ecuadorTime(row.createdAt) : "Fecha no registrada";
 export function auditReportRows(rows) {
   return rows.map((row) => [row.documentId, formatDate(row), row.actorEmail, row.actorUid, ROLES[row.role] || row.role,
@@ -28,8 +27,7 @@ export async function exportAuditExcel(rows, filters, generated = new Date()) {
   const changes = book.addWorksheet("Cambios y detalles");
   changes.columns = [{ header: "ID registro", width: 32 }, { header: "Tipo de detalle", width: 24 }, { header: "Parte", width: 10 }, { header: "Datos", width: 110 }];
   for (const row of rows) {
-    for (const [label, value] of [["Antes", row.before], ["Después / cambios", row.after]]) {
-      const text = detailText(value);
+    for (const { label, text } of auditDetailSections(row)) {
       for (let index = 0; index < text.length; index += 30000) changes.addRow([row.documentId, label, index / 30000 + 1, text.slice(index, index + 30000)]);
     }
   }
@@ -57,9 +55,9 @@ export async function exportAuditPdf(rows, filters, generated = new Date()) {
     body: rows.length ? rows.map((row) => [formatDate(row), `${row.actorEmail}\n${ROLES[row.role] || row.role}`, `${row.eventName || "Sin evento"}\n${AUDIT_MODULES[row.module]}`, `${row.action}\n${OUTCOMES[row.outcome]}`, `${row.summary}${row.amountCents == null ? "" : `\nImporte: ${money(row.amountCents)}`}`, `${row.documentId}\n${row.targetPath}`]) : [["Sin registros para los filtros aplicados"]],
     styles: { fontSize: 7, cellPadding: 2, overflow: "linebreak" }, headStyles: { fillColor: [16, 16, 16], textColor: [217, 255, 67] }, rowPageBreak: "avoid", didDrawPage: heading });
   if (rows.length) {
-    pdf.addPage(); heading(); pdf.setFontSize(11); pdf.text("Detalle de cambios · antes y después", 14, 36);
-    autoTable(pdf, { startY: 42, margin: { top: 32, bottom: 17 }, head: [["ID / acción", "Antes", "Después / campos modificados"]],
-      body: rows.map((row) => [row.documentId + "\n" + row.action, detailText(row.before), detailText(row.after)]),
+    pdf.addPage(); heading(); pdf.setFontSize(11); pdf.text("Detalle de actividades y cambios", 14, 36);
+    autoTable(pdf, { startY: 42, margin: { top: 32, bottom: 17 }, head: [["ID / acción", "Información", "Detalle registrado"]],
+      body: rows.flatMap((row) => auditDetailSections(row).map(({ label, text }) => [row.documentId + "\n" + row.action, label, text])),
       styles: { fontSize: 6, overflow: "linebreak", cellPadding: 2 }, headStyles: { fillColor: [16, 16, 16], textColor: [217, 255, 67] },
       columnStyles: { 0: { cellWidth: 48 } }, didDrawPage: heading });
   }

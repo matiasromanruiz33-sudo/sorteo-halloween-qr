@@ -2,12 +2,18 @@ import "./finance.css";
 import "./audit.css";
 import { collection, query, where, orderBy, limit, startAfter, getDocsFromServer } from "firebase/firestore";
 import { OWNER_UID, escape as h, ecuadorTime, money } from "./finance-core.js";
-import { normalizeAudit, filterAudit, AUDIT_MODULES, OUTCOMES, ROLES } from "./audit-core.js";
+import { normalizeAudit, filterAudit, auditDetailSections, AUDIT_MODULES, OUTCOMES, ROLES } from "./audit-core.js";
 import { tryActivity } from "./audit-store.js";
 import { exportAuditExcel, exportAuditPdf } from "./audit-reports.js";
 
 const select = (name, title, values, value) => `<label class="fin-field">${title}<select name="${name}"><option value="">Todos</option>${Object.entries(values).map(([key, label]) => `<option value="${h(key)}" ${key === value ? "selected" : ""}>${h(label)}</option>`).join("")}</select></label>`;
 const input = (name, title, value = "", type = "text") => `<label class="fin-field">${title}<input name="${name}" type="${type}" value="${h(value)}" ${type === "text" ? 'maxlength="150"' : ""} /></label>`;
+
+function renderDetails(row) {
+  return `<details><summary>Ver detalle</summary><p>${h(row.evidence)}</p>
+    <p><b>Usuario:</b> ${h(row.actorEmail)}<br><b>Perfil:</b> ${h(ROLES[row.role] || row.role)}<br><b>Acción:</b> ${h(row.action)}<br><b>Resultado:</b> ${h(OUTCOMES[row.outcome])}${row.targetPath ? `<br><b>Documento:</b> ${h(row.targetPath)}` : ""}</p>
+    ${auditDetailSections(row).map(({ label, text }) => `<b>${h(label)}</b><pre>${h(text)}</pre>`).join("")}</details>`;
+}
 
 export async function readAuditSources(db, filters, cancelled = () => false) {
   async function read(ref, dated = true) {
@@ -86,7 +92,7 @@ export function createAuditModule({ root, db, notify }) {
       <div class="fin-metrics audit-metrics"><article><span>Registros filtrados</span><strong>${filtered.length}</strong></article><article><span>Realizados</span><strong>${filtered.filter((row) => row.outcome === "success").length}</strong></article><article><span>Rechazados / errores</span><strong>${filtered.filter((row) => row.outcome !== "success").length}</strong></article></div>
       <div class="fin-actions"><button class="primary-button" data-audit="pdf" ${disabled ? "disabled" : ""}>↓ DESCARGAR PDF</button><button class="outline-button" data-audit="excel" ${disabled ? "disabled" : ""}>↓ DESCARGAR EXCEL (.XLSX)</button></div>
       <p class="fin-footnote">Se exportan los ${filtered.length} registros filtrados, incluidos los de otras páginas de la tabla. Actualiza el historial para incluir movimientos recientes. Los resultados de sesiones y errores son actividad de la aplicación autenticada; las mutaciones de eventos y QR se guardan junto a su log.</p>
-      <div class="fin-table-wrap"><table class="audit-table"><thead><tr><th>Fecha / hora Ecuador</th><th>Usuario / perfil</th><th>Evento / módulo</th><th>Acción / resultado</th><th>Descripción</th><th>Cambios</th></tr></thead><tbody>${filtered.slice(page * pageSize, (page + 1) * pageSize).map((row) => `<tr><td>${row.createdAt ? h(ecuadorTime(row.createdAt)) : "Fecha no registrada"}<small>${h(row.documentId)}</small></td><td>${h(row.actorEmail)}<small>${h(ROLES[row.role])}</small></td><td>${h(row.eventName || "Sin evento")}<small>${h(AUDIT_MODULES[row.module])}</small></td><td>${h(row.action)}<small class="audit-${row.outcome}">${OUTCOMES[row.outcome]}</small></td><td>${h(row.summary)}${row.amountCents == null ? "" : `<small>Importe: ${money(row.amountCents)}</small>`}</td><td><details><summary>Ver detalle</summary><p>${h(row.targetPath)}<br>${h(row.evidence)}</p><b>Antes</b><pre>${h(JSON.stringify(row.before, null, 2))}</pre><b>Después / cambios</b><pre>${h(JSON.stringify(row.after, null, 2))}</pre></details></td></tr>`).join("") || `<tr><td colspan="6">${busy ? "Cargando..." : "Pulsa Actualizar historial o ajusta los filtros para consultar los registros."}</td></tr>`}</tbody></table></div>
+      <div class="fin-table-wrap"><table class="audit-table"><thead><tr><th>Fecha / hora Ecuador</th><th>Usuario / perfil</th><th>Evento / módulo</th><th>Acción / resultado</th><th>Descripción</th><th>Cambios</th></tr></thead><tbody>${filtered.slice(page * pageSize, (page + 1) * pageSize).map((row) => `<tr><td>${row.createdAt ? h(ecuadorTime(row.createdAt)) : "Fecha no registrada"}<small>${h(row.documentId)}</small></td><td>${h(row.actorEmail)}<small>${h(ROLES[row.role])}</small></td><td>${h(row.eventName || "Sin evento")}<small>${h(AUDIT_MODULES[row.module])}</small></td><td>${h(row.action)}<small class="audit-${row.outcome}">${OUTCOMES[row.outcome]}</small></td><td>${h(row.summary)}${row.amountCents == null ? "" : `<small>Importe: ${money(row.amountCents)}</small>`}</td><td>${renderDetails(row)}</td></tr>`).join("") || `<tr><td colspan="6">${busy ? "Cargando..." : "Pulsa Actualizar historial o ajusta los filtros para consultar los registros."}</td></tr>`}</tbody></table></div>
       <div class="audit-pagination"><button class="outline-button" data-audit="previous" ${page === 0 ? "disabled" : ""}>← Anterior</button><span>Página ${page + 1} / ${Math.max(1, Math.ceil(filtered.length / pageSize))}</span><button class="outline-button" data-audit="next" ${(page + 1) * pageSize >= filtered.length ? "disabled" : ""}>Siguiente →</button></div>`;
   }
   root.addEventListener("submit", (event) => {

@@ -9,6 +9,25 @@ const parse = (value) => { try { return typeof value === "string" ? JSON.parse(v
 export const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTime() || 0 : 0);
 export const auditDate = (row) => row.createdAt ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/Guayaquil", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(millis(row.createdAt))) : "";
 
+const hasDetail = (value) => value != null && value !== "" && (typeof value !== "object" || Object.keys(value).length > 0);
+
+export function auditDetailSections(row) {
+  const before = hasDetail(row.before), after = hasDetail(row.after);
+  if (row.module === "activity" && !before) {
+    return [
+      { label: "Actividad registrada", text: row.summary || row.action || "Actividad sin descripción adicional." },
+      ...(after ? [{ label: "Información adicional", text: JSON.stringify(row.after, null, 2) }] : []),
+      { label: "Comparación de estados", text: "No aplica: esta actividad no contiene cambios de datos para comparar antes y después." },
+    ];
+  }
+  if (!before && !after) return [{ label: "Información del registro", text: row.summary || row.action || "Registro de auditoría" },
+    { label: "Detalles adicionales", text: "Este registro no contiene estados anteriores ni posteriores guardados." }];
+  return [
+    { label: "Antes", text: before ? JSON.stringify(row.before, null, 2) : "No se registró un estado anterior para esta operación." },
+    { label: "Después / cambios", text: after ? JSON.stringify(row.after, null, 2) : "No se registró un estado posterior para esta operación." },
+  ];
+}
+
 export function normalizeAudit(source, id, data, event = {}) {
   const role = data.role || auditRole(data.actorUid);
   const row = { id: `${source}:${event.id || ""}:${id}`, documentId: id, source,
